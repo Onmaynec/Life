@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    paths: ['life_lab/__init__.py']
+    paths: ['life_lab/__init__.py', '.github/workflows/release.yml']
   workflow_dispatch:
 
 permissions:
@@ -45,7 +45,7 @@ jobs:
             echo "Релиз $version уже существует"
             exit 0
           fi
-          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${version}" --jq '.object.sha' 2>/dev/null || true)"
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${version}" --jq '.object.sha // empty' 2>/dev/null || true)"
           if [[ -n "$existing_sha" && "$existing_sha" != "$GITHUB_SHA" ]]; then
             echo "Тег $version уже указывает на другой коммит: $existing_sha"
             exit 1
