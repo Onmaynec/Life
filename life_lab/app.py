@@ -14,24 +14,28 @@ from PIL import Image, ImageDraw, ImageTk
 
 from . import __version__
 from .patterns import PATTERNS, decode_rle, encode_rle, pattern_array, place_pattern
-from .storage import load_document, save_world
+from .storage import load_document, load_research, save_world
 from .history import ExperimentHistory
+from .instruments import ResearchLog
+from .chrome import dark_titlebar
+from .skins import SKINS, skin
+from .research_ui import ResearchWorkspace
 from .setup import WorldOptions, create_world
-from .visuals import PALETTES, STYLES, colorize, draw_view, minimap
+from .visuals import PALETTES, STYLES, HEATMAP_FIELDS, colorize, draw_view, minimap, heatmap_view
 from .preferences import Preferences, load_preferences, save_preferences
 from .world import CellularAutomaton, Ecosystem, RULE_PRESETS
 
 
-BG = "#09111D"
-PANEL = "#111D2A"
-PANEL_2 = "#1B2C3C"
-EDGE = "#2A4050"
-TEXT = "#ECF6F8"
-MUTED = "#8FA5B5"
-GREEN = "#6BE8BE"
-YELLOW = "#F8C76C"
-PINK = "#FF789F"
-CYAN = "#80BDFF"
+BG = "#0B0D10"
+PANEL = "#14171C"
+PANEL_2 = "#1D2229"
+EDGE = "#303640"
+TEXT = "#F0F2F5"
+MUTED = "#949DAA"
+GREEN = "#54D9E6"
+YELLOW = "#E3B56C"
+PINK = "#EB728B"
+CYAN = "#9DAEFF"
 FONT = "Segoe UI"
 
 
@@ -48,12 +52,16 @@ def is_text_input(widget: Any) -> bool:
 class LifeLabApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
+        preferences = load_preferences()
+        self.skin_var = tk.StringVar(value=preferences.skin)
+        self.animation_var = tk.BooleanVar(value=preferences.animation)
+        self._set_colors(preferences.skin)
         self.root.title(f"Life  —  v{__version__}")
         self.root.geometry("1570x950")
-        self.root.minsize(1190, 730)
+        self.root.minsize(1080, 710)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        preferences = load_preferences()
+        self.root.after(80, lambda: dark_titlebar(self.root, BG))
 
         self.world: CellularAutomaton | Ecosystem = CellularAutomaton()
         self.world.randomize(0.22, seed=42)
@@ -67,6 +75,8 @@ class LifeLabApp:
         self.trail_var = tk.BooleanVar(value=preferences.trails)
         self.palette_var = tk.StringVar(value=preferences.palette)
         self.cell_style_var = tk.StringVar(value=preferences.style)
+        self.layer_var = tk.StringVar(value="Организмы")
+        self.step_ms = 0.0
         self.minimap_image: ImageTk.PhotoImage | None = None
         self._last_inspected: tuple[int, int] | None = None
         self.density_var = tk.DoubleVar(value=0.22)
@@ -87,6 +97,8 @@ class LifeLabApp:
         self.last_paint: tuple[int, int] | None = None
         self.pointer: tuple[int, int] | None = None
         self.experiment = ExperimentHistory.start(self.world)
+        self.research_log = ResearchLog()
+        self.research_log.capture(self.world)
         self.chart_mode_var = tk.StringVar(value="Численность")
         self.trails = np.zeros_like(self.world.cells, dtype=np.uint8)
         self.undo: list[tuple[np.ndarray, ...]] = []
@@ -100,7 +112,9 @@ class LifeLabApp:
         self._update_mode_ui()
         self._update_tool_ui()
         self._update_stats()
-        self._show_hint("Пробел — запуск  ·  ЛКМ — рисовать  ·  Колесо — масштаб  ·  СКМ — перемещение")
+        self._show_hint("Пробел — запуск  ·  ЛКМ — редактирование  ·  ПКМ / СКМ — перемещение  ·  Колесо — масштаб")
+        self._pulse_phase = 0
+        self.root.after(220, self._pulse_status)
         self.root.after(35, self._tick)
 
     def run(self) -> None:
@@ -112,10 +126,49 @@ class LifeLabApp:
                                          style=self.cell_style_var.get(),
                                          grid=self.grid_var.get(),
                                          trails=self.trail_var.get(),
-                                         speed=self.speed_var.get()))
+                                         speed=self.speed_var.get(),
+                                         skin=self.skin_var.get(),
+                                         animation=self.animation_var.get()))
         except OSError:
             pass  # Lack of write access must not prevent the application from closing.
         self.root.destroy()
+
+    def _set_colors(self, name: str) -> None:
+        """Apply a neutral dark surface and an accessible colour accent."""
+        global BG, PANEL, PANEL_2, EDGE, TEXT, MUTED, GREEN, CYAN, YELLOW, PINK
+        selected = skin(name)
+        BG, PANEL, PANEL_2, EDGE = selected.base, selected.panel, selected.surface, selected.border
+        TEXT, MUTED = selected.text, selected.muted
+        GREEN, CYAN, YELLOW, PINK = selected.accent, selected.secondary, selected.warning, selected.danger
+
+    def change_skin(self, _event: Any = None) -> None:
+        """Recreate Tk surfaces so every control picks up the same neutral theme."""
+        self._set_colors(self.skin_var.get())
+        self.root.configure(bg=BG)
+        for widget in self.root.winfo_children():
+            if not isinstance(widget, tk.Toplevel):
+                widget.destroy()
+        self._configure_styles()
+        self._build_ui()
+        self._bind_events()
+        self._update_mode_ui()
+        self._update_tool_ui()
+        self._update_stats()
+        self._mark_dirty()
+        self.root.after(80, lambda: dark_titlebar(self.root, BG))
+        self._show_hint("Оформление переключено — состояние мира не изменилось")
+
+    def _pulse_status(self) -> None:
+        """Low-cost heartbeat for the run indicator; disabled when animations are off."""
+        if self.root.winfo_exists():
+            if hasattr(self,"live_indicator"):
+                if self.running:
+                    self._pulse_phase = (self._pulse_phase + 1) % 6
+                    color = GREEN if self._pulse_phase < 3 or not self.animation_var.get() else MUTED
+                    self.live_indicator.config(text="● ИДЁТ", fg=color)
+                else:
+                    self.live_indicator.config(text="● ПАУЗА",fg=MUTED)
+            self.root.after(220,self._pulse_status)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -135,13 +188,42 @@ class LifeLabApp:
     def _button(self, parent: tk.Misc, title: str, command: Any,
                 accent: bool = False, width: int | None = None) -> tk.Button:
         b = tk.Button(parent, text=title, command=command, bg=GREEN if accent else PANEL_2,
-                      fg=BG if accent else TEXT, activebackground="#8bf9cd" if accent else EDGE,
+                      fg=BG if accent else TEXT, activebackground=GREEN if accent else EDGE,
                       activeforeground=BG if accent else TEXT, relief="flat", borderwidth=0,
                       font=(FONT, 10, "bold"), cursor="hand2", pady=9, padx=12,
                       highlightthickness=0)
         if width is not None:
             b.config(width=width)
+        # Hover is a non-blocking colour transition, no additional threads.
+        b._hover_epoch = 0
+        b.bind("<Enter>",lambda _e,button=b:self._button_hover(button,True),add="+")
+        b.bind("<Leave>",lambda _e,button=b:self._button_hover(button,False),add="+")
         return b
+
+    def _button_hover(self, button: tk.Button, entering: bool) -> None:
+        if not button.winfo_exists():
+            return
+        button._hover_epoch += 1
+        epoch=button._hover_epoch
+        original=button.cget("bg")
+        if entering:
+            button._hover_base=original
+        end = EDGE if entering else getattr(button,"_hover_base",PANEL_2)
+        if original == end:
+            return
+        if not self.animation_var.get():
+            button.config(bg=end)
+            return
+        first, last = rgb(original), rgb(end)
+        def tick(step:int)->None:
+            if not button.winfo_exists() or button._hover_epoch != epoch:
+                return
+            t=step/4
+            color="#{:02x}{:02x}{:02x}".format(*(round(a*(1-t)+b*t) for a,b in zip(first,last)))
+            button.config(bg=color)
+            if step<4:
+                button.after(18,lambda:tick(step+1))
+        tick(1)
 
     def _label(self, parent: tk.Misc, text: str, size: int = 10,
                color: str = MUTED, bold: bool = False) -> tk.Label:
@@ -181,17 +263,19 @@ class LifeLabApp:
 
     def _build_ui(self) -> None:
         # Workspace header: actions stay visible while the left and right panels scroll.
-        header = tk.Frame(self.root, bg=BG, padx=26, pady=16)
+        header = tk.Frame(self.root, bg=BG, padx=18, pady=11)
         header.pack(fill="x")
         brand = tk.Frame(header, bg=BG)
         brand.pack(side="left")
         tk.Label(brand, text="◉", fg=GREEN, bg=BG, font=(FONT, 27, "bold")).pack(side="left", padx=(0, 10))
         wordmark = tk.Frame(brand, bg=BG)
         wordmark.pack(side="left")
-        self._label(wordmark, "life.", 25, TEXT, True).pack(anchor="w")
-        self._label(wordmark, "ЛАБОРАТОРИЯ ЖИВЫХ МИРОВ", 8, MUTED, True).pack(anchor="w")
+        self._label(wordmark, "life.", 23, TEXT, True).pack(anchor="w")
+        self._label(wordmark, "RESEARCH STUDIO  /  ЭКСПЕРИМЕНТАЛЬНАЯ СРЕДА", 8, MUTED, True).pack(anchor="w")
         actions = tk.Frame(header, bg=BG)
         actions.pack(side="right")
+        self.live_indicator=self._label(actions, "● ПАУЗА", 9, MUTED, True)
+        self.live_indicator.pack(side="left",padx=(0,15))
         self._button(actions, "?  СПРАВКА", self.show_help).pack(side="left", padx=(0, 7))
         self._button(actions, "+  НОВЫЙ МИР", self.new_world_dialog).pack(side="left", padx=(0, 8))
         self._button(actions, "СОХРАНИТЬ", self.save).pack(side="left", padx=(0, 16))
@@ -206,11 +290,12 @@ class LifeLabApp:
 
         divider = tk.Frame(self.root, height=1, bg=EDGE)
         divider.pack(fill="x")
-        workspace = tk.Frame(self.root, bg=BG, padx=16, pady=14)
+        workspace = tk.Frame(self.root, bg=BG, padx=11, pady=11)
         workspace.pack(fill="both", expand=True)
 
         # Left: experiment configuration and tools.
-        left_shell, self.side, self.side_scroll = self._scroll_panel(workspace, 278)
+        left_shell, self.side, self.side_scroll = self._scroll_panel(workspace, 260)
+        self.left_shell=left_shell
         left_shell.pack(side="left", fill="y", padx=(0, 12))
         self._label(self.side, "НАСТРОЙКА", 10, TEXT, True).pack(anchor="w", pady=(0, 4))
         self._label(self.side, "Режим, инструменты и правила", 9, MUTED).pack(anchor="w", pady=(0, 11))
@@ -308,12 +393,13 @@ class LifeLabApp:
 
         # Right: live data, navigator and appearance settings.
         right_shell, self.inspector_side, self.inspector_scroll = self._scroll_panel(workspace, 294)
+        self.right_shell=right_shell
         right_shell.pack(side="right", fill="y", padx=(12, 0))
-        self._label(self.inspector_side, "НАБЛЮДЕНИЕ", 10, TEXT, True).pack(anchor="w", pady=(0, 4))
-        self._label(self.inspector_side, "Показатели и облик мира", 9, MUTED).pack(anchor="w", pady=(0, 11))
-        tk.Frame(self.inspector_side, height=1, bg=EDGE).pack(fill="x", pady=(0, 7))
+        self.research_ui = ResearchWorkspace(self, self.inspector_side)
+        self._label(self.research_ui.overview, "МОНИТОРИНГ", 11, TEXT, True).pack(anchor="w", pady=(0, 5))
+        self._label(self.research_ui.overview, "Показатели состояния мира", 9, MUTED).pack(anchor="w", pady=(0, 10))
 
-        stats = self._section(self.inspector_side, "Статистика")
+        stats = self._section(self.research_ui.overview, "Статистика")
         stats.pack(fill="x", pady=(0, 10))
         self.stats_labels: dict[str, tk.Label] = {}
         for key, title in (("generation", "Поколение"), ("population", "Живые клетки"),
@@ -332,7 +418,7 @@ class LifeLabApp:
                 row.pack_forget()
                 setattr(self, f"_statrow_{key}", row)
 
-        graph_section = self._section(self.inspector_side, "Динамика")
+        graph_section = self._section(self.research_ui.overview, "Динамика")
         graph_section.pack(fill="x", pady=(0, 10))
         self.chart_mode = ttk.Combobox(graph_section, textvariable=self.chart_mode_var,
                                        values=["Численность", "Метаболизм", "Зрение", "Плодовитость"],
@@ -344,7 +430,7 @@ class LifeLabApp:
         self.chart.bind("<Configure>", lambda _e: self._draw_chart())
         self._label(graph_section, "120 последних записей  ·  по поколениям", 8).pack(anchor="w", pady=(6, 0))
 
-        navigator = self._section(self.inspector_side, "Навигатор")
+        navigator = self._section(self.research_ui.overview, "Навигатор")
         navigator.pack(fill="x", pady=(0, 10))
         self.minimap_canvas = tk.Canvas(navigator, bg="#0C1927", height=130,
                                         highlightthickness=1, highlightbackground=EDGE, cursor="hand2")
@@ -359,7 +445,7 @@ class LifeLabApp:
                                         font=(FONT, 9))
         self.cell_inspector.pack(fill="x")
 
-        visual = self._section(self.inspector_side, "Оформление мира")
+        visual = self._section(self.research_ui.overview, "Оформление мира")
         visual.pack(fill="x", pady=(0, 12))
         self._label(visual, "Цветовая палитра", 9).pack(anchor="w", pady=(0, 5))
         self.palette_combo = ttk.Combobox(visual, textvariable=self.palette_var,
@@ -381,6 +467,8 @@ class LifeLabApp:
 
         # Central stage stays as wide as possible.
         stage = tk.Frame(workspace, bg=PANEL, highlightbackground=EDGE, highlightthickness=1)
+        self.stage=stage
+        self.focus_mode=False
         stage.pack(side="left", fill="both", expand=True)
         toolbar = tk.Frame(stage, bg=PANEL, padx=17, pady=12)
         toolbar.pack(fill="x")
@@ -389,6 +477,11 @@ class LifeLabApp:
         self.world_mode_label.pack(side="right")
         quick_appearance = tk.Frame(stage, bg=PANEL, padx=17, pady=5)
         quick_appearance.pack(fill="x")
+        self._label(quick_appearance, "ТЕМА", 8).pack(side="left", padx=(0, 6))
+        chosen_skin = ttk.Combobox(quick_appearance, textvariable=self.skin_var,
+                          values=list(SKINS), state="readonly",style="Lab.TCombobox",width=20)
+        chosen_skin.pack(side="left",padx=(0,14))
+        chosen_skin.bind("<<ComboboxSelected>>",self.change_skin)
         self._label(quick_appearance, "ПАЛИТРА", 8).pack(side="left", padx=(0, 7))
         preset = ttk.Combobox(quick_appearance, textvariable=self.palette_var,
                               values=list(PALETTES), state="readonly", style="Lab.TCombobox", width=13)
@@ -399,6 +492,11 @@ class LifeLabApp:
                             values=STYLES, state="readonly", style="Lab.TCombobox", width=11)
         kind.pack(side="left")
         kind.bind("<<ComboboxSelected>>", self._appearance_changed)
+        self._label(quick_appearance,"СЛОЙ",8).pack(side="left",padx=(11,5))
+        layer=ttk.Combobox(quick_appearance,textvariable=self.layer_var,
+                    values=HEATMAP_FIELDS,state="readonly",style="Lab.TCombobox",width=13)
+        layer.pack(side="left")
+        layer.bind("<<ComboboxSelected>>",self._appearance_changed)
 
         metrics = tk.Frame(stage, bg=PANEL, padx=12, pady=7)
         metrics.pack(fill="x")
@@ -416,7 +514,7 @@ class LifeLabApp:
         self._button(foot, "−", lambda: self._zoom_center(-1), width=3).pack(side="right", padx=(4, 0))
         self._button(foot, "+", lambda: self._zoom_center(1), width=3).pack(side="right", padx=(4, 0))
         self._button(foot, "ВПИСАТЬ", self.fit_world).pack(side="right", padx=(0, 5))
-        self._label(foot, "СКМ — перемещение  ·  колесо — масштаб", 8).pack(side="right", padx=(8, 12))
+        self._label(foot, "ПКМ / СКМ — перемещение · F10 — фокус", 8).pack(side="right", padx=(8, 12))
 
         status = tk.Frame(self.root, bg=BG, padx=25, pady=10)
         status.pack(fill="x")
@@ -424,11 +522,14 @@ class LifeLabApp:
         self.notice_label.pack(side="left")
         self.performance_label = self._label(status, "", 9, GREEN)
         self.performance_label.pack(side="right")
-        self.root.bind_all("<MouseWheel>", self._wheel_panels, add="+")
+        self.root.bind_all("<MouseWheel>", self._wheel_panels)
 
     def _bind_events(self) -> None:
         self.root.bind_all("<space>", self._key_space)
         self.root.bind_all("<F1>", lambda _e: self.show_help())
+        self.root.bind_all("<F10>", lambda _e: self.toggle_focus())
+        self.root.bind_all("<F11>",lambda _e:self.toggle_fullscreen())
+        self.root.bind_all("<Control-Tab>", lambda _e:self.next_research_tab())
         # File operations are deliberately allowed when a text field has focus.
         self.root.bind_all("<Control-s>", lambda _e: self.save())
         self.root.bind_all("<Control-o>", lambda _e: self.load())
@@ -451,8 +552,8 @@ class LifeLabApp:
         self.canvas.bind("<B1-Motion>", self._mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self._mouse_up)
         self.canvas.bind("<ButtonPress-3>", self._right_down)
-        self.canvas.bind("<B3-Motion>", self._right_drag)
-        self.canvas.bind("<ButtonRelease-3>", self._mouse_up)
+        self.canvas.bind("<B3-Motion>", self._pan_drag)
+        self.canvas.bind("<ButtonRelease-3>", self._pan_up)
         self.canvas.bind("<ButtonPress-2>", self._pan_down)
         self.canvas.bind("<B2-Motion>", self._pan_drag)
         self.canvas.bind("<ButtonRelease-2>", self._pan_up)
@@ -469,6 +570,24 @@ class LifeLabApp:
             return None
         callback()
         return "break"
+
+    def toggle_focus(self) -> None:
+        self.focus_mode = not self.focus_mode
+        if self.focus_mode:
+            self.left_shell.pack_forget()
+            self.right_shell.pack_forget()
+        else:
+            self.left_shell.pack(side="left",fill="y",padx=(0,12),before=self.stage)
+            self.right_shell.pack(side="right",fill="y",padx=(12,0),before=self.stage)
+        self._mark_dirty()
+
+    def toggle_fullscreen(self) -> None:
+        self.root.attributes("-fullscreen", not bool(self.root.attributes("-fullscreen")))
+        self._mark_dirty()
+
+    def next_research_tab(self) -> None:
+        names=list(self.research_ui.pages)
+        self.research_ui.show(names[(names.index(self.research_ui.current)+1)%len(names)])
 
     def _key_space(self, event: tk.Event[Any]) -> str | None:
         return self._game_shortcut(event, self.toggle_run)
@@ -529,7 +648,8 @@ class LifeLabApp:
                 desc += (f"  ·  Энергия: {self.world.energy[y,x]:.1f}"
                          f"\nМетаболизм: {self.world.trait[y,x]:.2f}"
                          f"  ·  Зрение: {self.world.sight[y,x]:.2f}"
-                         f"\nПлодовитость: {self.world.fertility[y,x]:.2f}")
+                         f"\nПлодовитость: {self.world.fertility[y,x]:.2f}"
+                         f"  ·  Возраст: {int(self.world.age[y,x])}")
         else:
             desc = f"{'Живая клетка' if kind else 'Пустая клетка'}  ·  {x}:{y}\nПравило {self.world.rule}"
         self.cell_inspector.config(text=desc, fg=TEXT)
@@ -598,7 +718,10 @@ class LifeLabApp:
         if isinstance(self.world, Ecosystem):
             return tuple(a.copy() for a in (self.world.cells, self.world.energy,
                                              self.world.trait, self.world.sight,
-                                             self.world.fertility, self.world.nutrients))
+                                             self.world.fertility, self.world.nutrients,
+                                             self.world.moisture, self.world.age,
+                                             self.world.seeds, self.world.organic,
+                                             self.world.toxins, self.world.altitude))
         return (self.world.cells.copy(),)
 
     def _restore(self, snapshot: tuple[np.ndarray, ...]) -> None:
@@ -607,7 +730,10 @@ class LifeLabApp:
         if isinstance(self.world, Ecosystem):
             for arr, data in zip((self.world.cells, self.world.energy,
                                   self.world.trait, self.world.sight,
-                                  self.world.fertility, self.world.nutrients), snapshot):
+                                  self.world.fertility, self.world.nutrients,
+                                  self.world.moisture, self.world.age,
+                                  self.world.seeds, self.world.organic,
+                                  self.world.toxins, self.world.altitude), snapshot):
                 arr[:] = data
         else:
             self.world.cells[:] = snapshot[0]
@@ -640,6 +766,11 @@ class LifeLabApp:
         self._last_inspected = None
         self.cell_inspector.config(text="Наведите курсор на клетку", fg=TEXT)
         self.experiment = history if history is not None else ExperimentHistory.start(self.world)
+        self.research_log = ResearchLog()
+        self.research_log.capture(self.world)
+        self.research_ui.baseline = None
+        self.research_ui.sync_ecology()
+        self.research_ui.refresh(force=True)
         self._update_stats()
         self._mark_dirty()
 
@@ -653,16 +784,17 @@ class LifeLabApp:
         dialog.geometry(f"{dw}x{dh}+{x}+{y}")
         dialog.resizable(False, False)
         dialog.configure(bg=PANEL)
+        dialog.after(80, lambda: dark_titlebar(dialog, BG))
         dialog.transient(self.root)
         frame = tk.Frame(dialog, bg=PANEL, padx=27, pady=23)
         frame.pack(fill="both", expand=True)
-        self._label(frame, "КАК ИГРАТЬ В LIFE", 17, TEXT, True).pack(anchor="w", pady=(0, 5))
+        self._label(frame, "КАК РАБОТАТЬ С LIFE", 17, TEXT, True).pack(anchor="w", pady=(0, 5))
         self._label(frame, "Создавайте миры и наблюдайте, как меняются их законы.", 10).pack(anchor="w", pady=(0, 18))
         for title, desc in (
             ("Классика Конвея", "Каждая клетка либо жива, либо нет. Её судьба зависит от восьми соседей. Попробуйте поставить глайдер и запустить симуляцию."),
             ("Экосистема", "Растения используют питательные вещества, травоядные ищут растения, а хищники охотятся. У животных есть наследуемые признаки."),
-            ("Управление", "Пробел — пауза. N — один шаг. Кисть рисует ЛКМ, ластик работает ПКМ. Колесо меняет масштаб, СКМ перемещает карту, F вписывает мир."),
-            ("Наблюдение", "Наведите курсор на клетку, чтобы узнать её состояние. Нажмите на мини-карту для перехода. Выбирайте палитру и стиль, не меняя правила мира."),
+            ("Управление", "Пробел — пауза, N — шаг. ЛКМ редактирует, ластик выбирается отдельно. ПКМ или СКМ — перемещение, колесо — масштаб, F — вписать мир."),
+            ("Наблюдение", "Справа: обзор, анализ, 3D-графики, климат и каталог структур. F10 — режим без боковых панелей, F11 — полный экран, Ctrl+Tab — вкладки."),
         ):
             self._label(frame, title, 11, GREEN, True).pack(anchor="w", pady=(0, 4))
             tk.Label(frame, text=desc, bg=PANEL, fg=TEXT, justify="left", anchor="w",
@@ -681,6 +813,7 @@ class LifeLabApp:
         dialog.geometry(f"{dw}x{dh}+{x}+{y}")
         dialog.resizable(False, False)
         dialog.configure(bg=PANEL)
+        dialog.after(80, lambda: dark_titlebar(dialog, BG))
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -761,6 +894,8 @@ class LifeLabApp:
             self.running = False
             self._update_run_button()
             self.world = new_world
+            if isinstance(new_world, Ecosystem):
+                new_world.ecology.enabled = True
             self.wrap_var.set(options.wrap)
             self.density_var.set(options.density if options.mode == "classic"
                                  else options.plants + options.herbivores + options.predators)
@@ -797,6 +932,8 @@ class LifeLabApp:
         else:
             self.world = Ecosystem(w, h, wrap=self.wrap_var.get())
         self.world.randomize(self.density_var.get())
+        if isinstance(self.world, Ecosystem):
+            self.world.ecology.enabled = True
         self.undo.clear()
         self.redo.clear()
         self.tool = "draw"
@@ -862,13 +999,19 @@ class LifeLabApp:
 
     def _advance(self) -> None:
         was_live = self.world.cells.copy() if self.world.mode == "classic" else None
+        stamp=time.perf_counter()
         events = self.world.step()
+        self.step_ms=(time.perf_counter()-stamp)*1000
         if was_live is not None:
             newly_dead = (was_live > 0) & (self.world.cells == 0)
             self.trails[self.trails > 0] -= 1
             self.trails[newly_dead] = 7
             self.trails[self.world.cells != 0] = 0
         self.experiment.record(self.world, events)
+        self.research_log.capture(self.world, events)
+        self.research_ui.check_extinction()
+        if self.world.generation % 5 == 0:
+            self.research_ui.refresh()
         self._update_stats()
         self._last_inspected = None
         self._update_cell_inspector(self.pointer)
@@ -999,7 +1142,7 @@ class LifeLabApp:
         self.dragging = True
         self.pencil_value = 0 if self.tool == "erase" else (self.species if self.world.mode == "ecosystem" else 1)
         if self.tool == "stamp" and isinstance(self.world, CellularAutomaton):
-            place_pattern(self.world.cells, pattern_array(self.pattern_name.get()), x, y)
+            place_pattern(self.world.cells, self.research_ui.stamp_array(self.pattern_name.get()), x, y)
             self.dragging = False
         else:
             self.world.paint(x, y, self.pencil_value)
@@ -1027,17 +1170,11 @@ class LifeLabApp:
         self._update_stats()
 
     def _right_down(self, e: tk.Event[Any]) -> None:
-        x, y = self._screen_to_grid(e.x, e.y)
-        if 0 <= x < self.world.width and 0 <= y < self.world.height:
-            self._push_undo()
-            self.dragging = True
-            self.pencil_value = 0
-            self.world.paint(x, y, 0)
-            self.last_paint = (x, y)
-            self._mark_dirty()
+        """Right button always pans; erasing is the left-button eraser tool."""
+        self._pan_down(e)
 
     def _right_drag(self, e: tk.Event[Any]) -> None:
-        self._mouse_drag(e)
+        self._pan_drag(e)
 
     def _pan_down(self, e: tk.Event[Any]) -> None:
         self.panning = True
@@ -1100,9 +1237,20 @@ class LifeLabApp:
             crop = self.world.cells[y0:y1, x0:x1]
             soil = self.world.nutrients[y0:y1, x0:x1] if isinstance(self.world, Ecosystem) else None
             fading = self.trails[y0:y1, x0:x1] if self.world.mode == "classic" and self.trail_var.get() else None
-            image = draw_view(crop, mode=self.world.mode, zoom=self.zoom,
-                              palette_name=self.palette_var.get(), style=self.cell_style_var.get(),
-                              grid=self.grid_var.get(), trails=fading, nutrients=soil)
+            if isinstance(self.world,Ecosystem) and self.layer_var.get()!="Организмы":
+                fields={"Минералы":self.world.nutrients,"Влага":self.world.moisture,
+                        "Энергия":self.world.energy,"Возраст":self.world.age,
+                        "Рельеф":self.world.altitude,"Органика":self.world.organic,
+                        "Токсины":self.world.toxins}
+                layer=self.layer_var.get()
+                limits={"Минералы":100,"Влага":100,"Энергия":100,"Возраст":300,
+                        "Рельеф":1,"Органика":50,"Токсины":50}
+                vals=fields[layer][y0:y1,x0:x1]/limits[layer]
+                image=heatmap_view(vals,crop,zoom=self.zoom,palette_name=self.palette_var.get(),grid=self.grid_var.get())
+            else:
+                image = draw_view(crop, mode=self.world.mode, zoom=self.zoom,
+                                  palette_name=self.palette_var.get(), style=self.cell_style_var.get(),
+                                  grid=self.grid_var.get(), trails=fading, nutrients=soil)
             self.current_image = ImageTk.PhotoImage(image)
             canvas.create_image(self.cam_x+x0*self.zoom, self.cam_y+y0*self.zoom,
                                 anchor="nw", image=self.current_image)
@@ -1115,7 +1263,7 @@ class LifeLabApp:
             if 0 <= x < self.world.width and 0 <= y < self.world.height:
                 sx, sy = self.cam_x+x*self.zoom, self.cam_y+y*self.zoom
                 if self.tool == "stamp" and self.world.mode == "classic":
-                    pat = pattern_array(self.pattern_name.get())
+                    pat = self.research_ui.stamp_array(self.pattern_name.get())
                     for yy, xx in np.argwhere(pat):
                         qx, qy = sx + int(xx)*self.zoom, sy + int(yy)*self.zoom
                         canvas.create_rectangle(qx, qy, qx+self.zoom, qy+self.zoom,
@@ -1145,7 +1293,9 @@ class LifeLabApp:
             self._render()
             self.dirty = False
         if self.world.generation % 5 == 0:
-            self.performance_label.config(text=f"{self.world.width}×{self.world.height}   ·   {self.zoom} PX/КЛЕТКА   ·   v{__version__}")
+            fps=1/max(0.0001,sum(self.fps_samples)/max(1,len(self.fps_samples)))
+            self.performance_label.config(text=(f"{self.world.width}×{self.world.height} · "
+                 f"{self.step_ms:.1f} МС/ШАГ · {fps:.0f} FPS · v{__version__}"))
         self.root.after(30, self._tick)
 
     def save(self) -> None:
@@ -1153,7 +1303,7 @@ class LifeLabApp:
                                             filetypes=[("Мир Life", "*.lifelab")])
         if path:
             try:
-                save_world(self.world, path, self.experiment)
+                save_world(self.world, path, self.experiment, self.research_log)
                 self._show_hint(f"Сохранено: {Path(path).name}")
             except Exception as exc:
                 messagebox.showerror("Не удалось сохранить", str(exc))
@@ -1163,6 +1313,7 @@ class LifeLabApp:
         if path:
             try:
                 self.world, history = load_document(path)
+                saved_research = load_research(path)
                 self.running = False
                 self._update_run_button()
                 self.wrap_var.set(self.world.wrap)
@@ -1175,6 +1326,11 @@ class LifeLabApp:
                 self._update_mode_ui()
                 self._update_tool_ui()
                 self._reset_visuals(history)
+                self.research_log = saved_research
+                if not self.research_log.records:
+                    self.research_log.capture(self.world)
+                self.research_ui.sync_ecology()
+                self.research_ui.refresh(force=True)
                 self.fit_world()
                 self._show_hint(f"Загружено: {Path(path).name}")
             except Exception as exc:
@@ -1229,10 +1385,19 @@ class LifeLabApp:
             try:
                 soil = self.world.nutrients if isinstance(self.world, Ecosystem) else None
                 fading = self.trails if self.world.mode == "classic" else None
-                im = draw_view(self.world.cells, mode=self.world.mode, zoom=8,
-                               palette_name=self.palette_var.get(), style=self.cell_style_var.get(),
-                               grid=self.grid_var.get(), trails=fading if self.trail_var.get() else None,
-                               nutrients=soil)
+                if isinstance(self.world,Ecosystem) and self.layer_var.get()!="Организмы":
+                    layers={"Минералы":(self.world.nutrients,100),"Влага":(self.world.moisture,100),
+                            "Энергия":(self.world.energy,100),"Возраст":(self.world.age,300),
+                            "Рельеф":(self.world.altitude,1),"Органика":(self.world.organic,50),
+                            "Токсины":(self.world.toxins,50)}
+                    layer,maximum=layers[self.layer_var.get()]
+                    im=heatmap_view(layer/maximum,self.world.cells,zoom=8,
+                                    palette_name=self.palette_var.get(),grid=self.grid_var.get())
+                else:
+                    im = draw_view(self.world.cells, mode=self.world.mode, zoom=8,
+                                   palette_name=self.palette_var.get(), style=self.cell_style_var.get(),
+                                   grid=self.grid_var.get(), trails=fading if self.trail_var.get() else None,
+                                   nutrients=soil)
                 im.save(path)
                 self._show_hint(f"PNG сохранён: {Path(path).name}")
             except Exception as exc:

@@ -7,7 +7,7 @@ if %errorlevel% equ 0 (
 ) else (
     set PY=python
 )
-%PY% -c "import numpy, PIL" >nul 2>nul
+%PY% -c "import numpy, PIL, matplotlib" >nul 2>nul
 if errorlevel 1 (
     echo Installing Python dependencies...
     %PY% -m pip install -r requirements.txt

@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from .genetics import evolve_genome, select_food_step
+from .ecology import EcologySettings, environmental_step
 
 
 RULE_PRESETS = {
@@ -167,6 +168,13 @@ class Ecosystem:
         self.sight = np.full((height, width), 2.0, dtype=np.float32)
         self.fertility = np.ones((height, width), dtype=np.float32)
         self.nutrients = np.full((height, width), 65.0, dtype=np.float32)
+        self.moisture = np.full((height, width), 55.0, dtype=np.float32)
+        self.age = np.zeros((height, width), dtype=np.uint16)
+        self.seeds = np.zeros((height, width), dtype=np.uint8)
+        self.organic = np.zeros((height, width), dtype=np.float32)
+        self.toxins = np.zeros((height, width), dtype=np.float32)
+        self.altitude = np.full((height, width),0.50,dtype=np.float32)
+        self.ecology = EcologySettings()
         self.generation = 0
         self.wrap = wrap
         self._rng = np.random.default_rng(seed)
@@ -191,6 +199,12 @@ class Ecosystem:
         self.sight.fill(2)
         self.fertility.fill(1)
         self.nutrients.fill(65)
+        self.moisture.fill(55)
+        self.age.fill(0)
+        self.seeds.fill(0)
+        self.organic.fill(0)
+        self.toxins.fill(0)
+        self.altitude.fill(.50)
         self.generation = 0
         self.last_births = self.last_deaths = self.mutations = 0
         self.total_births = self.total_deaths = 0
@@ -216,6 +230,10 @@ class Ecosystem:
         for kind in (2, 3):
             self.energy[self.cells == kind] = SPECIES[kind].initial_energy
         self.nutrients[:] = self._rng.uniform(45, 95, self.cells.shape).astype(np.float32)
+        self.moisture[:] = self._rng.uniform(35, 85, self.cells.shape).astype(np.float32)
+        gy,gx=np.indices(self.cells.shape,dtype=np.float32)
+        elevation = .5+.18*np.sin(gx*.035)+.16*np.cos(gy*.05)+self._rng.normal(0,.05,self.cells.shape)
+        self.altitude[:]=np.clip(elevation,0,1).astype(np.float32)
 
     def paint(self, x: int, y: int, kind: int = 1) -> bool:
         if not (0 <= x < self.width and 0 <= y < self.height and 0 <= kind <= 3):
@@ -225,6 +243,8 @@ class Ecosystem:
         self.trait[y, x] = 1.0
         self.sight[y, x] = 2.0
         self.fertility[y, x] = 1.0
+        self.age[y, x] = 0
+        self.seeds[y, x] = 0
         return True
 
     def _neighbours(self, x: int, y: int) -> list[tuple[int, int]]:
@@ -259,6 +279,8 @@ class Ecosystem:
         n = neighbour_counts(cells == 1, self.wrap)
         available = (cells == 0) & (self.nutrients >= 23.0)
         fertile = available & (n >= 1) & (n <= 5)
+        if self.ecology.enabled and self.ecology.pollination:
+            fertile &= n >= 2
         sprout = (fertile & (rng.random(cells.shape) < 0.17)) | (available & (self.nutrients > 55) & (rng.random(cells.shape) < 0.00018))
         births += int(np.count_nonzero(sprout))
         cells[sprout] = 1
@@ -266,6 +288,9 @@ class Ecosystem:
 
         # Predators move first; herbivores then take their turns. Animal
         # positions are shuffled to avoid permanent scan-direction bias.
+        if self.ecology.enabled:
+            from .ecology import climate_values
+            climate = climate_values(self.generation,self.ecology)
         for kind in (3, 2):
             actors = np.argwhere(cells == kind)
             rng.shuffle(actors)
@@ -279,25 +304,45 @@ class Ecosystem:
                 sight = float(self.sight[y, x])
                 fertility = float(self.fertility[y, x])
                 # Better sight and faster reproduction have an ongoing cost.
-                self.energy[y, x] -= spec.cost * metabolic * (1 + 0.09 * (sight - 1) + 0.12 * max(0, fertility - 1))
+                life_cost = spec.cost * metabolic * (1 + 0.09 * (sight - 1) + 0.12 * max(0, fertility - 1))
+                if self.ecology.enabled:
+                    if self.ecology.winter_sleep and kind==2 and climate["season"]=="Зима":
+                        life_cost *= .64
+                    if self.ecology.nocturnal_predators and kind==3 and climate["sunlight"]<.55:
+                        life_cost *= .83
+                    if self.ecology.territoriality and sum(cells[ny,nx]==kind for nx,ny in self._neighbours(x,y)) >= 5:
+                        life_cost *= 1.30
+                self.energy[y,x] -= life_cost
                 if self.energy[y, x] <= 0:
                     cells[y, x] = 0
                     self.energy[y, x] = 0
                     self.trait[y, x] = 1
                     self.sight[y, x] = 2
                     self.fertility[y, x] = 1
+                    self.age[y, x] = 0
                     deaths += 1
                     continue
                 nearby = self._neighbours(x, y)
                 food = [(nx, ny) for nx, ny in nearby if cells[ny, nx] == prey_kind]
                 empty = [(nx, ny) for nx, ny in nearby if cells[ny, nx] == 0]
                 destination: tuple[int, int] | None = None
-                if food:
+                if self.ecology.enabled and self.ecology.herd_defense and kind==3:
+                    food=[(nx,ny) for nx,ny in food if sum(cells[py,px]==2 for px,py in self._neighbours(nx,ny))<4]
+                if self.ecology.enabled and self.ecology.herbivore_flee and kind==2 and empty and any(cells[ny,nx]==3 for nx,ny in nearby):
+                    danger=[(nx,ny) for nx,ny in nearby if cells[ny,nx]==3]
+                    destination=max(empty,key=lambda dest: min((dest[0]-px)**2+(dest[1]-py)**2 for px,py in danger))
+                elif food:
                     destination = food[0]
                     deaths += 1  # Prey eaten; never counted as surviving.
-                    self.energy[y, x] = min(100, self.energy[y, x] + spec.food_gain)
+                    bonus=1.0
+                    if self.ecology.enabled and self.ecology.pack_hunt and kind==3:
+                        bonus += 0.12*sum(cells[ny,nx]==3 for nx,ny in nearby)
+                    self.energy[y, x] = min(100, self.energy[y, x] + spec.food_gain * bonus)
                 elif empty and rng.random() < 0.78:
-                    destination = select_food_step(cells, x, y, prey_kind, sight, empty, self.wrap, rng)
+                    if self.ecology.enabled and self.ecology.animal_thirst and self.moisture[y,x]<12:
+                        destination=max(empty,key=lambda pos:float(self.moisture[pos[1],pos[0]]))
+                    else:
+                        destination = select_food_step(cells, x, y, prey_kind, sight, empty, self.wrap, rng)
                 if destination is not None:
                     nx, ny = destination
                     cells[ny, nx] = kind
@@ -305,14 +350,22 @@ class Ecosystem:
                     self.trait[ny, nx] = self.trait[y, x]
                     self.sight[ny, nx] = self.sight[y, x]
                     self.fertility[ny, nx] = self.fertility[y, x]
+                    self.age[ny, nx] = self.age[y, x]
                     cells[y, x] = 0
                     self.energy[y, x] = 0
                     self.trait[y, x] = 1
                     self.sight[y, x] = 2
                     self.fertility[y, x] = 1
+                    self.age[y, x] = 0
                     x, y = nx, ny
 
-                if self.energy[y, x] > spec.reproduce_at and rng.random() < (0.09 if kind == 2 else 0.055) * float(self.fertility[y, x]):
+                reproduction=(0.09 if kind == 2 else 0.055) * float(self.fertility[y,x])
+                if self.ecology.enabled:
+                    if self.ecology.seasonal_breeding:
+                        reproduction *= (1.22 if climate["season"] == "Весна" else .82 if climate["season"] == "Зима" else 1.0)
+                    if self.ecology.juvenile_stage and self.age[y,x] < (11 if kind==2 else 19):
+                        reproduction=0
+                if self.energy[y, x] > spec.reproduce_at and rng.random() < reproduction:
                     free = [(nx, ny) for nx, ny in self._neighbours(x, y) if cells[ny, nx] == 0]
                     if free:
                         nx, ny = free[0]
@@ -323,6 +376,7 @@ class Ecosystem:
                         genome, changed = evolve_genome((self.trait[y, x], self.sight[y, x],
                                                           self.fertility[y, x]), rng)
                         self.trait[ny, nx], self.sight[ny, nx], self.fertility[ny, nx] = genome
+                        self.age[ny, nx] = 0
                         new_mutations += int(changed)
                         births += 1
 
@@ -331,7 +385,9 @@ class Ecosystem:
         self.total_births += births
         self.total_deaths += deaths
         self.mutations += new_mutations
-        return {"births": births, "deaths": deaths, "mutations": new_mutations}
+        environmental = environmental_step(self)
+        return {"births": self.last_births, "deaths": self.last_deaths,
+                "mutations": new_mutations, **environmental}
 
     def genome_stats(self) -> dict[str, float]:
         """Population means over living animals only; empty worlds use zero."""

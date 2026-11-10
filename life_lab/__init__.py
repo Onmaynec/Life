@@ -1,2 +1,2 @@
-"""Life: cellular automata and an experimental evolution sandbox."""
-__version__ = "0.4.0"
+"""Life: a cellular automaton and experimental evolution studio."""
+__version__ = "0.5.0"

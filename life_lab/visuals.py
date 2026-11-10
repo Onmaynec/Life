@@ -23,6 +23,14 @@ class Palette:
 
 
 PALETTES: dict[str, Palette] = {
+    "Графит": Palette((11, 14, 18), (14, 18, 22), (37, 46, 54),
+                        ((82, 216, 231), (240, 183, 91), (222, 112, 142)), (40, 98, 116), "#36434E"),
+    "Оникс": Palette((10, 13, 12), (16, 20, 18), (38, 48, 40),
+                      ((173, 226, 103), (113, 200, 164), (231, 128, 106)), (53, 89, 62), "#34433B"),
+    "Титан": Palette((14, 16, 19), (19, 22, 25), (43, 49, 55),
+                      ((238, 182, 105), (137, 193, 219), (228, 137, 139)), (80, 71, 55), "#404852"),
+    "Аметист": Palette((11, 10, 17), (19, 17, 26), (44, 37, 59),
+                        ((171, 141, 255), (99, 193, 224), (245, 121, 185)), (83, 62, 130), "#413A57"),
     "Аврора": Palette((10, 18, 30), (13, 28, 34), (32, 51, 62),
                       ((107, 234, 183), (248, 199, 108), (255, 117, 151)), (45, 105, 94), "#4d7183"),
     "Биосфера": Palette((13, 24, 22), (20, 31, 25), (39, 59, 48),
@@ -150,3 +158,38 @@ def minimap(cells: np.ndarray, *, palette_name: str, width: int = 256,
     palette = PALETTES[palette_name]
     image = colorize(cells, mode, palette)
     return Image.fromarray(image, "RGB").resize((width, height), Image.Resampling.NEAREST)
+
+# Research layers expose scalar arrays without modifying the simulation state.
+HEATMAP_FIELDS = ("Организмы", "Минералы", "Влага", "Энергия", "Возраст", "Рельеф", "Органика", "Токсины")
+
+
+def heatmap_view(values: np.ndarray, cells: np.ndarray, *, zoom: int,
+                 palette_name: str, grid: bool = False) -> Image.Image:
+    """Render a quantitative field with a neutral-to-accent ramp and faint organisms.
+
+    Intensities are normalized to each field's *fixed* units at the caller, not
+    per-image maxima, allowing meaningful visual comparison between generations.
+    """
+    if values.shape != cells.shape or values.ndim != 2:
+        raise ValueError("Размер поля не совпадает с картой клеток")
+    if palette_name not in PALETTES or not 1 <= zoom <= 60:
+        raise ValueError("Неверный масштаб или палитра")
+    palette=PALETTES[palette_name]
+    intensity=np.clip(values.astype(np.float32),0,1)[...,None]
+    low=np.asarray(palette.background,dtype=np.float32)
+    high=np.asarray(palette.species[0],dtype=np.float32)
+    pixels=np.clip(low+(high-low)*intensity,0,255).astype(np.uint8)
+    for kind,color in enumerate(palette.species,start=1):
+        mask=cells==kind
+        if mask.any():
+            pixels[mask]=np.clip(pixels[mask].astype(np.float32)*0.75 +
+                                 np.asarray(color,dtype=np.float32)*0.25,0,255).astype(np.uint8)
+    h,w=cells.shape
+    im=Image.fromarray(pixels,"RGB").resize((w*zoom,h*zoom),Image.Resampling.NEAREST)
+    if grid and zoom>=8:
+        draw=ImageDraw.Draw(im)
+        for x in range(zoom,w*zoom,zoom):
+            draw.line((x,0,x,h*zoom),fill=palette.grid)
+        for y in range(zoom,h*zoom,zoom):
+            draw.line((0,y,w*zoom,y),fill=palette.grid)
+    return im
