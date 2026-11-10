@@ -139,6 +139,7 @@ class ResearchWorkspace:
                                     wraplength=230,padx=10,pady=12,font=("Segoe UI",9))
         self.compare_label.pack(fill="x",pady=(0,9))
         self.app._button(p,"ЗАФИКСИРОВАТЬ ПОКОЛЕНИЕ",self.take_baseline,accent=True).pack(fill="x",pady=2)
+        self.app._button(p,"СЕРИИ ЭКСПЕРИМЕНТОВ  /  Ctrl+E",self.app.open_experiment_studio,accent=True).pack(fill="x",pady=(3,9))
         self.app._button(p,"ЭКСПОРТ ИЗМЕРЕНИЙ CSV",self.export_csv).pack(fill="x",pady=2)
         self.app._button(p,"ОТЧЁТ ЭКСПЕРИМЕНТА MD",self.export_report).pack(fill="x",pady=2)
         self.pause_checkbox=tk.Checkbutton(p,text="Пауза при исчезновении видов",variable=self.alert_extinction,

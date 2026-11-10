@@ -20,6 +20,7 @@ from .instruments import ResearchLog
 from .chrome import dark_titlebar
 from .skins import SKINS, skin
 from .research_ui import ResearchWorkspace
+from .experiment_ui import ExperimentStudio
 from .setup import WorldOptions, create_world
 from .visuals import PALETTES, STYLES, HEATMAP_FIELDS, colorize, draw_view, minimap, heatmap_view
 from .preferences import Preferences, load_preferences, save_preferences
@@ -62,6 +63,7 @@ class LifeLabApp:
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(80, lambda: dark_titlebar(self.root, BG))
+        self.suite_window: ExperimentStudio | None = None
 
         self.world: CellularAutomaton | Ecosystem = CellularAutomaton()
         self.world.randomize(0.22, seed=42)
@@ -131,6 +133,8 @@ class LifeLabApp:
                                          animation=self.animation_var.get()))
         except OSError:
             pass  # Lack of write access must not prevent the application from closing.
+        if self.suite_window and self.suite_window.window.winfo_exists():
+            self.suite_window.close()
         self.root.destroy()
 
     def _set_colors(self, name: str) -> None:
@@ -156,6 +160,7 @@ class LifeLabApp:
         self._update_stats()
         self._mark_dirty()
         self.root.after(80, lambda: dark_titlebar(self.root, BG))
+        self.suite_window: ExperimentStudio | None = None
         self._show_hint("Оформление переключено — состояние мира не изменилось")
 
     def _pulse_status(self) -> None:
@@ -533,6 +538,7 @@ class LifeLabApp:
         # File operations are deliberately allowed when a text field has focus.
         self.root.bind_all("<Control-s>", lambda _e: self.save())
         self.root.bind_all("<Control-o>", lambda _e: self.load())
+        self.root.bind("<Control-e>", self._key_experiment)
         shortcuts = {
             "<Control-z>": self.undo_action,
             "<Control-y>": self.redo_action,
@@ -569,6 +575,19 @@ class LifeLabApp:
         if is_text_input(widget) or event.widget.winfo_toplevel() is not self.root:
             return None
         callback()
+        return "break"
+
+    def open_experiment_studio(self) -> None:
+        if self.suite_window and self.suite_window.window.winfo_exists():
+            self.suite_window.window.lift()
+            self.suite_window.window.focus_set()
+            return
+        self.suite_window = ExperimentStudio(self)
+
+    def _key_experiment(self, event: tk.Event[Any]) -> str | None:
+        if event.widget.winfo_toplevel() is not self.root:
+            return None
+        self.open_experiment_studio()
         return "break"
 
     def toggle_focus(self) -> None:
