@@ -1,0 +1,46 @@
+name: Публикация релиза
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Сборка архива и публикация
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          if [[ "$version" != v* ]]; then
+            echo "Для выпуска нужен тег формата vX.Y.Z"
+            exit 1
+          fi
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "Релиз $version уже опубликован"
+            exit 0
+          fi
+          git archive --format=zip --output="Life-${version}.zip" "$GITHUB_SHA"
+          awk -v tag="$version" '
+            $0 ~ "^## " tag "([[:space:]]|$)" { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [[ -s release-notes.md ]]; then
+            gh release create "$version" "Life-${version}.zip" \
+              --title "Life $version" --notes-file release-notes.md
+          else
+            gh release create "$version" "Life-${version}.zip" \
+              --title "Life $version" --generate-notes
+          fi
