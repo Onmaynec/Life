@@ -195,14 +195,24 @@ class Ecosystem:
         self.last_births = self.last_deaths = self.mutations = 0
         self.total_births = self.total_deaths = 0
 
-    def randomize(self, density: float = 0.19, seed: int | None = None) -> None:
+    def randomize(self, density: float = 0.19, seed: int | None = None,
+                  species_densities: tuple[float, float, float] | None = None) -> None:
+        if species_densities is None:
+            if not np.isfinite(density) or not 0 <= density <= 1:
+                raise ValueError("Плотность должна быть от 0 до 1")
+            species_densities = (density * 0.89, density * 0.095, density * 0.015)
+        if (len(species_densities) != 3 or any(not np.isfinite(v) or v < 0 or v > 1
+                for v in species_densities) or sum(species_densities) > 1.0 + 1e-12):
+            raise ValueError("Плотность видов должна суммарно составлять не более 100%")
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self.clear()
+        plant_density, herb_density, pred_density = species_densities
         roll = self._rng.random(self.cells.shape)
-        self.cells[roll < density * 0.89] = 1
-        self.cells[(roll >= density * 0.89) & (roll < density * 0.985)] = 2
-        self.cells[(roll >= density * 0.985) & (roll < density)] = 3
+        self.cells[roll < plant_density] = 1
+        self.cells[(roll >= plant_density) & (roll < plant_density + herb_density)] = 2
+        self.cells[(roll >= plant_density + herb_density) &
+                   (roll < plant_density + herb_density + pred_density)] = 3
         for kind in (2, 3):
             self.energy[self.cells == kind] = SPECIES[kind].initial_energy
         self.nutrients[:] = self._rng.uniform(45, 95, self.cells.shape).astype(np.float32)

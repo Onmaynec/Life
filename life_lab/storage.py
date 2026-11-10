@@ -8,12 +8,14 @@ from typing import Any
 import numpy as np
 
 from .world import CellularAutomaton, Ecosystem
+from .history import ExperimentHistory
 
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 
-def save_world(world: CellularAutomaton | Ecosystem, path: str | Path) -> None:
+def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
+               history: ExperimentHistory | None = None) -> None:
     meta: dict[str, Any] = {
         "version": FORMAT_VERSION,
         "mode": world.mode,
@@ -32,14 +34,17 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path) -> None:
                       fertility=world.fertility, nutrients=world.nutrients)
         meta["mutations"] = world.mutations
         meta["rng_state"] = world._rng.bit_generator.state
+    if history is not None:
+        arrays["history"] = np.array(json.dumps(history.records, ensure_ascii=False))
     with open(path, "wb") as f:
         np.savez_compressed(f, metadata=np.array(json.dumps(meta)), **arrays)
 
 
-def load_world(path: str | Path) -> CellularAutomaton | Ecosystem:
+def load_document(path: str | Path) -> tuple[CellularAutomaton | Ecosystem, ExperimentHistory]:
+    """Read the simulation and any recorded measurements from a .lifelab file."""
     with np.load(path, allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata"].item()))
-        if metadata.get("version") not in (1, FORMAT_VERSION):
+        if metadata.get("version") not in (1, 2, FORMAT_VERSION):
             raise ValueError("Неподдерживаемая версия сохранения")
         w, h = int(metadata["width"]), int(metadata["height"])
         CellularAutomaton._validate_dimensions(w, h)
@@ -74,4 +79,15 @@ def load_world(path: str | Path) -> CellularAutomaton | Ecosystem:
         world.generation = max(0, int(metadata.get("generation", 0)))
         world.total_births = max(0, int(metadata.get("total_births", 0)))
         world.total_deaths = max(0, int(metadata.get("total_deaths", 0)))
-        return world
+        if metadata["version"] >= 3 and "history" in archive:
+            history = ExperimentHistory.from_records(json.loads(str(archive["history"].item())))
+            if history.records and history.records[-1]["generation"] > world.generation:
+                raise ValueError("История содержит поколения из будущего")
+        else:
+            history = ExperimentHistory.start(world)
+        return world, history
+
+
+def load_world(path: str | Path) -> CellularAutomaton | Ecosystem:
+    """Compatibility API for callers only interested in simulation state."""
+    return load_document(path)[0]

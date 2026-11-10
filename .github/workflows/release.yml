@@ -2,34 +2,57 @@ name: Публикация релиза
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+    paths: ['life_lab/__init__.py']
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Установка библиотек
+        run: python -m pip install -r requirements.txt
+      - name: Проверка симуляции
+        run: python -m unittest discover -s tests -v
+
   release:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Сборка архива и публикация
+      - name: Публикация проверенной версии
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME}"
-          if [[ "$version" != v* ]]; then
-            echo "Для выпуска нужен тег формата vX.Y.Z"
+          version="v$(python -c 'from life_lab import __version__; print(__version__)')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$version" ]]; then
+            echo "Тег $GITHUB_REF_NAME не совпадает с номером версии $version"
             exit 1
           fi
           if gh release view "$version" >/dev/null 2>&1; then
-            echo "Релиз $version уже опубликован"
+            echo "Релиз $version уже существует"
             exit 0
+          fi
+          existing_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${version}" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ -n "$existing_sha" && "$existing_sha" != "$GITHUB_SHA" ]]; then
+            echo "Тег $version уже указывает на другой коммит: $existing_sha"
+            exit 1
+          fi
+          if [[ -z "$existing_sha" ]]; then
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${version}" -f sha="$GITHUB_SHA" >/dev/null
           fi
           git archive --format=zip --output="Life-${version}.zip" "$GITHUB_SHA"
           awk -v tag="$version" '

@@ -14,7 +14,9 @@ from PIL import Image, ImageDraw, ImageTk
 
 from . import __version__
 from .patterns import PATTERNS, decode_rle, encode_rle, pattern_array, place_pattern
-from .storage import load_world, save_world
+from .storage import load_document, save_world
+from .history import ExperimentHistory
+from .setup import WorldOptions, create_world
 from .world import CellularAutomaton, Ecosystem, RULE_PRESETS
 
 
@@ -33,6 +35,12 @@ FONT = "Segoe UI"
 
 def rgb(color: str) -> tuple[int, int, int]:
     return tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+
+
+def is_text_input(widget: Any) -> bool:
+    """True when an editable widget should receive a key instead of a game command."""
+    return isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox,
+                               ttk.Entry, ttk.Combobox, ttk.Spinbox))
 
 
 class LifeLabApp:
@@ -69,7 +77,8 @@ class LifeLabApp:
         self.pencil_value = 1
         self.last_paint: tuple[int, int] | None = None
         self.pointer: tuple[int, int] | None = None
-        self.history: deque[dict[str, int]] = deque(maxlen=120)
+        self.experiment = ExperimentHistory.start(self.world)
+        self.chart_mode_var = tk.StringVar(value="Численность")
         self.trails = np.zeros_like(self.world.cells, dtype=np.uint8)
         self.undo: list[tuple[np.ndarray, ...]] = []
         self.redo: list[tuple[np.ndarray, ...]] = []
@@ -228,6 +237,7 @@ class LifeLabApp:
         actions = self._section(self.side, "Управление миром")
         self.actions_frame = actions
         actions.pack(fill="x", pady=(0, 8))
+        self._button(actions, "+  СОЗДАТЬ МИР", self.new_world_dialog, accent=True).pack(fill="x", pady=(0, 7))
         acts = tk.Frame(actions, bg=PANEL)
         acts.pack(fill="x")
         self._button(acts, "СЛУЧАЙНЫЙ", self.randomize).pack(side="left", fill="x", expand=True, padx=(0, 5))
@@ -273,11 +283,16 @@ class LifeLabApp:
                 row.pack_forget()
                 setattr(self, f"_statrow_{key}", row)
 
-        graph_section = self._section(self.side, "История популяции")
+        graph_section = self._section(self.side, "История эксперимента")
         graph_section.pack(fill="x", pady=(0, 8))
-        self.chart = tk.Canvas(graph_section, height=105, bg="#0D1723", highlightthickness=0)
+        self.chart_mode = ttk.Combobox(graph_section, textvariable=self.chart_mode_var,
+                                       values=["Численность", "Метаболизм", "Зрение", "Плодовитость"],
+                                       state="readonly", style="Lab.TCombobox")
+        self.chart_mode.pack(fill="x", pady=(0, 7))
+        self.chart_mode.bind("<<ComboboxSelected>>", lambda _e: self._draw_chart())
+        self.chart = tk.Canvas(graph_section, height=125, bg="#0D1723", highlightthickness=0)
         self.chart.pack(fill="x")
-        self._label(graph_section, "Последние 120 поколений", 9).pack(anchor="w", pady=(4, 0))
+        self._label(graph_section, "Последние 120 записей. Виды: жёлтый / розовый", 9).pack(anchor="w", pady=(4, 0))
 
         files = self._section(self.side, "Файлы и обмен")
         files.pack(fill="x", pady=(0, 14))
@@ -291,6 +306,7 @@ class LifeLabApp:
         self._button(self.rle_row, "ЭКСПОРТ RLE", self.export_rle).pack(side="left", fill="x", expand=True)
         self.png_button = self._button(files, "СОХРАНИТЬ PNG", self.export_png)
         self.png_button.pack(fill="x")
+        self._button(files, "ЭКСПОРТ СТАТИСТИКИ CSV", self.export_csv).pack(fill="x", pady=(7, 0))
 
         status = tk.Frame(self.root, bg=BG, padx=26, pady=11)
         status.pack(fill="x")
@@ -301,19 +317,24 @@ class LifeLabApp:
 
     def _bind_events(self) -> None:
         self.root.bind_all("<space>", self._key_space)
-        self.root.bind_all("<Control-s>", lambda e: self.save())
-        self.root.bind_all("<Control-o>", lambda e: self.load())
-        self.root.bind_all("<Control-z>", lambda e: self.undo_action())
-        self.root.bind_all("<Control-y>", lambda e: self.redo_action())
-        self.root.bind("<KeyPress-n>", lambda e: self.step_once())
-        self.root.bind("<KeyPress-r>", lambda e: self.randomize())
-        self.root.bind("<KeyPress-c>", lambda e: self.clear())
-        self.root.bind("<KeyPress-g>", lambda e: self._toggle_grid())
-        self.root.bind("<KeyPress-f>", lambda e: self.fit_world())
-        self.root.bind("<KeyPress-1>", lambda e: self.set_species(1))
-        self.root.bind("<KeyPress-2>", lambda e: self.set_species(2))
-        self.root.bind("<KeyPress-3>", lambda e: self.set_species(3))
-        self.root.bind("<KeyPress-Escape>", lambda e: self.set_tool("draw"))
+        # File operations are deliberately allowed when a text field has focus.
+        self.root.bind_all("<Control-s>", lambda _e: self.save())
+        self.root.bind_all("<Control-o>", lambda _e: self.load())
+        shortcuts = {
+            "<Control-z>": self.undo_action,
+            "<Control-y>": self.redo_action,
+            "<KeyPress-n>": self.step_once,
+            "<KeyPress-r>": self.randomize,
+            "<KeyPress-c>": self.clear,
+            "<KeyPress-g>": self._toggle_grid,
+            "<KeyPress-f>": self.fit_world,
+            "<KeyPress-1>": lambda: self.set_species(1),
+            "<KeyPress-2>": lambda: self.set_species(2),
+            "<KeyPress-3>": lambda: self.set_species(3),
+            "<KeyPress-Escape>": lambda: self.set_tool("draw"),
+        }
+        for sequence, action in shortcuts.items():
+            self.root.bind(sequence, lambda e, callback=action: self._game_shortcut(e, callback))
         self.canvas.bind("<ButtonPress-1>", self._mouse_down)
         self.canvas.bind("<B1-Motion>", self._mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self._mouse_up)
@@ -330,10 +351,15 @@ class LifeLabApp:
         self.canvas.bind("<Leave>", self._mouse_leave)
         self.canvas.bind("<Configure>", self._mark_dirty)
 
-    def _key_space(self, e: tk.Event[Any]) -> None:
-        if isinstance(self.root.focus_get(), (tk.Entry, ttk.Combobox)):
-            return
-        self.toggle_run()
+    def _game_shortcut(self, event: tk.Event[Any], callback: Any) -> str | None:
+        widget = self.root.focus_get()
+        if is_text_input(widget) or event.widget.winfo_toplevel() is not self.root:
+            return None
+        callback()
+        return "break"
+
+    def _key_space(self, event: tk.Event[Any]) -> str | None:
+        return self._game_shortcut(event, self.toggle_run)
 
     def _scroll_sidebar(self, e: tk.Event[Any]) -> str:
         self.side_scroll.yview_scroll(-int(e.delta / 120), "units")
@@ -417,11 +443,117 @@ class LifeLabApp:
             self._restore(self.redo.pop())
             self._show_hint("Редактирование повторено")
 
-    def _reset_visuals(self) -> None:
+    def _reset_visuals(self, history: ExperimentHistory | None = None) -> None:
         self.trails = np.zeros_like(self.world.cells, dtype=np.uint8)
-        self.history.clear()
+        self.experiment = history if history is not None else ExperimentHistory.start(self.world)
         self._update_stats()
         self._mark_dirty()
+
+    def new_world_dialog(self) -> None:
+        """Configure and replace the current world after validating every field."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Новый мир — Life")
+        dialog.geometry("420x640")
+        dialog.resizable(False, False)
+        dialog.configure(bg=PANEL)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        mode = tk.StringVar(value="Классика" if self.world.mode == "classic" else "Экосистема")
+        width = tk.StringVar(value=str(self.world.width))
+        height = tk.StringVar(value=str(self.world.height))
+        seed = tk.StringVar(value="")
+        wrap = tk.BooleanVar(value=self.world.wrap)
+        rule = tk.StringVar(value=self.world.rule if isinstance(self.world, CellularAutomaton) else "B3/S23")
+        density = tk.StringVar(value="22")
+        plants = tk.StringVar(value="17")
+        herbivores = tk.StringVar(value="1.8")
+        predators = tk.StringVar(value="0.3")
+
+        frame = tk.Frame(dialog, bg=PANEL, padx=23, pady=16)
+        frame.pack(fill="both", expand=True)
+        self._label(frame, "НОВЫЙ ЭКСПЕРИМЕНТ", 14, TEXT, True).pack(anchor="w", pady=(0, 10))
+
+        def field(label: str, variable: tk.StringVar, parent: tk.Misc = frame) -> tk.Entry:
+            self._label(parent, label, 9).pack(anchor="w", pady=(8, 3))
+            entry = tk.Entry(parent, textvariable=variable, bg=PANEL_2, fg=TEXT,
+                             insertbackground=TEXT, relief="flat", font=(FONT, 11))
+            entry.pack(fill="x", ipady=5)
+            return entry
+
+        self._label(frame, "Режим", 9).pack(anchor="w")
+        mode_combo = ttk.Combobox(frame, textvariable=mode, values=("Классика", "Экосистема"),
+                                  state="readonly", style="Lab.TCombobox")
+        mode_combo.pack(fill="x")
+        sizes = tk.Frame(frame, bg=PANEL)
+        sizes.pack(fill="x")
+        left = tk.Frame(sizes, bg=PANEL)
+        right = tk.Frame(sizes, bg=PANEL)
+        left.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        right.pack(side="left", fill="x", expand=True)
+        field("Ширина (20–700)", width, left)
+        field("Высота (20–500)", height, right)
+        field("Seed (необязательно)", seed)
+        tk.Checkbutton(frame, text="Замкнутые границы", variable=wrap, bg=PANEL,
+                       fg=TEXT, selectcolor=PANEL_2, activebackground=PANEL,
+                       activeforeground=TEXT).pack(anchor="w", pady=(9, 0))
+        classic_fields = tk.Frame(frame, bg=PANEL)
+        field("Правило B/S", rule, classic_fields)
+        field("Плотность живых клеток, %", density, classic_fields)
+        eco_fields = tk.Frame(frame, bg=PANEL)
+        field("Растения, %", plants, eco_fields)
+        field("Травоядные, %", herbivores, eco_fields)
+        field("Хищники, %", predators, eco_fields)
+
+        def toggle_fields(_event: Any = None) -> None:
+            classic_fields.pack_forget()
+            eco_fields.pack_forget()
+            if mode.get() == "Классика":
+                classic_fields.pack(fill="x")
+            else:
+                eco_fields.pack(fill="x")
+
+        mode_combo.bind("<<ComboboxSelected>>", toggle_fields)
+        toggle_fields()
+        self._label(frame, "При создании текущий мир будет заменён.\nСохраните его заранее, если он нужен.", 9).pack(anchor="w", pady=(13, 5))
+
+        def confirm() -> None:
+            try:
+                options = WorldOptions(
+                    mode="classic" if mode.get() == "Классика" else "ecosystem",
+                    width=int(width.get()), height=int(height.get()), wrap=wrap.get(),
+                    rule=rule.get(), density=float(density.get().replace(",", ".")) / 100,
+                    plants=float(plants.get().replace(",", ".")) / 100,
+                    herbivores=float(herbivores.get().replace(",", ".")) / 100,
+                    predators=float(predators.get().replace(",", ".")) / 100,
+                    seed=int(seed.get()) if seed.get().strip() else None)
+                new_world = create_world(options)
+            except (ValueError, OverflowError) as exc:
+                messagebox.showerror("Неверные параметры мира", str(exc), parent=dialog)
+                return
+            self.running = False
+            self._update_run_button()
+            self.world = new_world
+            self.wrap_var.set(options.wrap)
+            self.density_var.set(options.density if options.mode == "classic"
+                                 else options.plants + options.herbivores + options.predators)
+            if isinstance(new_world, CellularAutomaton):
+                self.rule_entry_var.set(new_world.rule)
+            self.undo.clear()
+            self.redo.clear()
+            self.tool = "draw"
+            self.chart_mode_var.set("Численность")
+            self._update_mode_ui()
+            self._update_tool_ui()
+            self._reset_visuals()
+            dialog.destroy()
+            self.fit_world()
+            self._show_hint("Создан мир с заданными начальными условиями")
+
+        self._button(frame, "СОЗДАТЬ МИР", confirm, accent=True).pack(fill="x", pady=(8, 0))
+        dialog.bind("<Return>", lambda _e: confirm() if not isinstance(dialog.focus_get(), ttk.Combobox) else None)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        mode_combo.focus_set()
 
     def change_mode(self, mode: str) -> None:
         if mode == self.world.mode:
@@ -441,6 +573,7 @@ class LifeLabApp:
         self.undo.clear()
         self.redo.clear()
         self.tool = "draw"
+        self.chart_mode_var.set("Численность")
         self._update_mode_ui()
         self._update_tool_ui()
         self._reset_visuals()
@@ -502,13 +635,13 @@ class LifeLabApp:
 
     def _advance(self) -> None:
         was_live = self.world.cells.copy() if self.world.mode == "classic" else None
-        self.world.step()
+        events = self.world.step()
         if was_live is not None:
             newly_dead = (was_live > 0) & (self.world.cells == 0)
             self.trails[self.trails > 0] -= 1
             self.trails[newly_dead] = 7
             self.trails[self.world.cells != 0] = 0
-        self.history.append(self.world.counts())
+        self.experiment.record(self.world, events)
         self._update_stats()
         self._mark_dirty()
 
@@ -550,22 +683,38 @@ class LifeLabApp:
     def _draw_chart(self) -> None:
         chart = self.chart
         chart.delete("all")
-        w = max(chart.winfo_width(), 255)
-        h = 105
-        chart.create_line(0, h - 16, w, h - 16, fill=EDGE)
-        if len(self.history) < 2:
+        width = max(chart.winfo_width(), 255)
+        height = 125
+        chart.create_line(6, height - 18, width - 6, height - 18, fill=EDGE)
+        rows = self.experiment.records[-120:]
+        if len(rows) < 2:
             return
-        names = ["population"] if self.world.mode == "classic" else ["plants", "herbivores", "predators"]
-        colors = [GREEN] if self.world.mode == "classic" else [GREEN, YELLOW, PINK]
-        max_v = max(max(float(x.get(name, 0)) for x in self.history) for name in names)
-        max_v = max(5, max_v)
+        chart_type = self.chart_mode_var.get() if self.world.mode == "ecosystem" else "Численность"
+        if chart_type == "Численность":
+            names = ["population"] if self.world.mode == "classic" else ["plants", "herbivores", "predators"]
+            colors = [GREEN] if self.world.mode == "classic" else [GREEN, YELLOW, PINK]
+        else:
+            gene = {"Метаболизм": "metabolism", "Зрение": "sight", "Плодовитость": "fertility"}[chart_type]
+            names = [f"herbivores_{gene}", f"predators_{gene}"]
+            colors = [YELLOW, PINK]
+        seen = [float(row[key]) for row in rows for key in names if row.get(key) is not None]
+        ymax = max(1.0, max(seen, default=0)) * 1.08
+        chart.create_text(width - 8, 8, text=f"{ymax:.2f}" if chart_type != "Численность" else f"{int(ymax)}",
+                          fill=MUTED, anchor="ne", font=(FONT, 8))
         for name, color in zip(names, colors):
-            coords: list[float] = []
-            for i, entry in enumerate(self.history):
-                coords.extend((7 + i / max(1, len(self.history) - 1) * (w - 14),
-                               h - 16 - float(entry.get(name, 0)) / max_v * (h - 29)))
-            if len(coords) >= 4:
-                chart.create_line(*coords, fill=color, width=2, smooth=True)
+            segment: list[float] = []
+            for i, row in enumerate(rows):
+                value = row.get(name)
+                if value is None:
+                    if len(segment) >= 4:
+                        chart.create_line(*segment, fill=color, width=2)
+                    segment = []
+                    continue
+                x = 7 + i / (len(rows) - 1) * (width - 14)
+                y = height - 18 - float(value) / ymax * (height - 33)
+                segment.extend((x, y))
+            if len(segment) >= 4:
+                chart.create_line(*segment, fill=color, width=2)
 
     def fit_world(self) -> None:
         w, h = max(self.canvas.winfo_width(), 500), max(self.canvas.winfo_height(), 400)
@@ -780,7 +929,7 @@ class LifeLabApp:
                                             filetypes=[("Мир Life", "*.lifelab")])
         if path:
             try:
-                save_world(self.world, path)
+                save_world(self.world, path, self.experiment)
                 self._show_hint(f"Сохранено: {Path(path).name}")
             except Exception as exc:
                 messagebox.showerror("Не удалось сохранить", str(exc))
@@ -789,7 +938,7 @@ class LifeLabApp:
         path = filedialog.askopenfilename(title="Открыть мир", filetypes=[("Мир Life", "*.lifelab")])
         if path:
             try:
-                self.world = load_world(path)
+                self.world, history = load_document(path)
                 self.running = False
                 self._update_run_button()
                 self.wrap_var.set(self.world.wrap)
@@ -798,9 +947,10 @@ class LifeLabApp:
                 self.undo.clear()
                 self.redo.clear()
                 self.tool = "draw"
+                self.chart_mode_var.set("Численность")
                 self._update_mode_ui()
                 self._update_tool_ui()
-                self._reset_visuals()
+                self._reset_visuals(history)
                 self.fit_world()
                 self._show_hint(f"Загружено: {Path(path).name}")
             except Exception as exc:
@@ -838,6 +988,16 @@ class LifeLabApp:
                 self._show_hint(f"RLE сохранён: {Path(path).name}")
             except Exception as exc:
                 messagebox.showerror("Ошибка экспорта RLE", str(exc))
+
+    def export_csv(self) -> None:
+        path = filedialog.asksaveasfilename(title="Экспорт истории эксперимента",
+                                            defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if path:
+            try:
+                self.experiment.export_csv(path)
+                self._show_hint(f"CSV сохранён: {Path(path).name}")
+            except Exception as exc:
+                messagebox.showerror("Ошибка экспорта CSV", str(exc))
 
     def export_png(self) -> None:
         path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("Изображение PNG", "*.png")])
