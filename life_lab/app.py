@@ -256,7 +256,10 @@ class LifeLabApp:
         for key, title in (("generation", "Поколение"), ("population", "Живых клеток"),
                            ("births", "Всего рождений"), ("deaths", "Всего смертей"),
                            ("plants", "Растения"), ("herbivores", "Травоядные"),
-                           ("predators", "Хищники"), ("mutations", "Мутации")):
+                           ("predators", "Хищники"), ("mutations", "Мутации"),
+                           ("metabolism", "Средний метаболизм"),
+                           ("sight", "Средняя дальность зрения"),
+                           ("fertility", "Средняя плодовитость")):
             row = tk.Frame(stats, bg=PANEL)
             row.pack(fill="x", pady=2)
             self._label(row, title, 10).pack(side="left")
@@ -265,7 +268,8 @@ class LifeLabApp:
             self.stats_labels[key] = l
             if key == "plants":
                 self.eco_stats_start = row
-            if key in ("plants", "herbivores", "predators", "mutations"):
+            if key in ("plants", "herbivores", "predators", "mutations",
+                       "metabolism", "sight", "fertility"):
                 row.pack_forget()
                 setattr(self, f"_statrow_{key}", row)
 
@@ -375,7 +379,8 @@ class LifeLabApp:
     def _snapshot(self) -> tuple[np.ndarray, ...]:
         if isinstance(self.world, Ecosystem):
             return tuple(a.copy() for a in (self.world.cells, self.world.energy,
-                                             self.world.trait, self.world.nutrients))
+                                             self.world.trait, self.world.sight,
+                                             self.world.fertility, self.world.nutrients))
         return (self.world.cells.copy(),)
 
     def _restore(self, snapshot: tuple[np.ndarray, ...]) -> None:
@@ -383,7 +388,8 @@ class LifeLabApp:
             return
         if isinstance(self.world, Ecosystem):
             for arr, data in zip((self.world.cells, self.world.energy,
-                                  self.world.trait, self.world.nutrients), snapshot):
+                                  self.world.trait, self.world.sight,
+                                  self.world.fertility, self.world.nutrients), snapshot):
                 arr[:] = data
         else:
             self.world.cells[:] = snapshot[0]
@@ -456,7 +462,8 @@ class LifeLabApp:
             self.rules_frame.pack_forget()
             self.rle_row.pack_forget()
             self.world_mode_label.config(text="ECOSYSTEM · EXPERIMENTAL", fg=YELLOW)
-        for key in ("plants", "herbivores", "predators", "mutations"):
+        for key in ("plants", "herbivores", "predators", "mutations",
+                       "metabolism", "sight", "fertility"):
             row = getattr(self, f"_statrow_{key}")
             if classic:
                 row.pack_forget()
@@ -533,8 +540,11 @@ class LifeLabApp:
             "predators": counts.get("predators", 0),
             "mutations": counts.get("mutations", 0),
         }
+        if isinstance(self.world, Ecosystem):
+            values.update(self.world.genome_stats())
         for key, val in values.items():
-            self.stats_labels[key].config(text=f"{val:,}".replace(",", " "))
+            formatted = f"{val:.2f}" if isinstance(val, float) else f"{val:,}".replace(",", " ")
+            self.stats_labels[key].config(text=formatted)
         self._draw_chart()
 
     def _draw_chart(self) -> None:

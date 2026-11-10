@@ -1,4 +1,4 @@
-"""Simulation engines for Life.
+"""Simulation engines for LIFE//LAB.
 
 Two explicit modes:
 - CellularAutomaton: configurable B/S Moore-neighbourhood rules.
@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+from .genetics import evolve_genome, select_food_step
 
 
 RULE_PRESETS = {
@@ -150,11 +152,10 @@ SPECIES = {
 
 
 class Ecosystem:
-    """Educational predator–prey sandbox with local interactions.
+    """Local predator–prey sandbox with three inheritable animal traits.
 
-    Plants depend on renewable nutrients. Animals consume energy, seek prey,
-    move into prey or vacant cells and reproduce with heritable metabolism
-    (a mutation of up to ±0.08 per birth). A fixed PRNG makes runs reproducible.
+    Metabolism, sight and fertility affect the cost of living, foraging
+    and reproduction. All random choices use the world RNG.
     """
     mode = "ecosystem"
 
@@ -163,6 +164,8 @@ class Ecosystem:
         self.cells = np.zeros((height, width), dtype=np.uint8)
         self.energy = np.zeros((height, width), dtype=np.float32)
         self.trait = np.ones((height, width), dtype=np.float32)
+        self.sight = np.full((height, width), 2.0, dtype=np.float32)
+        self.fertility = np.ones((height, width), dtype=np.float32)
         self.nutrients = np.full((height, width), 65.0, dtype=np.float32)
         self.generation = 0
         self.wrap = wrap
@@ -185,6 +188,8 @@ class Ecosystem:
         self.cells.fill(0)
         self.energy.fill(0)
         self.trait.fill(1)
+        self.sight.fill(2)
+        self.fertility.fill(1)
         self.nutrients.fill(65)
         self.generation = 0
         self.last_births = self.last_deaths = self.mutations = 0
@@ -208,6 +213,8 @@ class Ecosystem:
         self.cells[y, x] = kind
         self.energy[y, x] = SPECIES[kind].initial_energy if kind in (2, 3) else 0.0
         self.trait[y, x] = 1.0
+        self.sight[y, x] = 2.0
+        self.fertility[y, x] = 1.0
         return True
 
     def _neighbours(self, x: int, y: int) -> list[tuple[int, int]]:
@@ -259,10 +266,16 @@ class Ecosystem:
                     continue  # Already eaten/moved.
                 spec = SPECIES[kind]
                 metabolic = float(self.trait[y, x])
-                self.energy[y, x] -= spec.cost * metabolic
+                sight = float(self.sight[y, x])
+                fertility = float(self.fertility[y, x])
+                # Better sight and faster reproduction have an ongoing cost.
+                self.energy[y, x] -= spec.cost * metabolic * (1 + 0.09 * (sight - 1) + 0.12 * max(0, fertility - 1))
                 if self.energy[y, x] <= 0:
                     cells[y, x] = 0
                     self.energy[y, x] = 0
+                    self.trait[y, x] = 1
+                    self.sight[y, x] = 2
+                    self.fertility[y, x] = 1
                     deaths += 1
                     continue
                 nearby = self._neighbours(x, y)
@@ -274,18 +287,22 @@ class Ecosystem:
                     deaths += 1  # Prey eaten; never counted as surviving.
                     self.energy[y, x] = min(100, self.energy[y, x] + spec.food_gain)
                 elif empty and rng.random() < 0.78:
-                    destination = empty[0]
+                    destination = select_food_step(cells, x, y, prey_kind, sight, empty, self.wrap, rng)
                 if destination is not None:
                     nx, ny = destination
                     cells[ny, nx] = kind
                     self.energy[ny, nx] = self.energy[y, x]
                     self.trait[ny, nx] = self.trait[y, x]
+                    self.sight[ny, nx] = self.sight[y, x]
+                    self.fertility[ny, nx] = self.fertility[y, x]
                     cells[y, x] = 0
                     self.energy[y, x] = 0
                     self.trait[y, x] = 1
+                    self.sight[y, x] = 2
+                    self.fertility[y, x] = 1
                     x, y = nx, ny
 
-                if self.energy[y, x] > spec.reproduce_at and rng.random() < (0.09 if kind == 2 else 0.055):
+                if self.energy[y, x] > spec.reproduce_at and rng.random() < (0.09 if kind == 2 else 0.055) * float(self.fertility[y, x]):
                     free = [(nx, ny) for nx, ny in self._neighbours(x, y) if cells[ny, nx] == 0]
                     if free:
                         nx, ny = free[0]
@@ -293,10 +310,10 @@ class Ecosystem:
                         self.energy[y, x] -= child_energy
                         cells[ny, nx] = kind
                         self.energy[ny, nx] = child_energy
-                        mutation = float(rng.normal(0, 0.04))
-                        self.trait[ny, nx] = float(np.clip(self.trait[y, x] + mutation, 0.65, 1.45))
-                        if abs(mutation) > 0.025:
-                            new_mutations += 1
+                        genome, changed = evolve_genome((self.trait[y, x], self.sight[y, x],
+                                                          self.fertility[y, x]), rng)
+                        self.trait[ny, nx], self.sight[ny, nx], self.fertility[ny, nx] = genome
+                        new_mutations += int(changed)
                         births += 1
 
         self.generation += 1
@@ -305,6 +322,15 @@ class Ecosystem:
         self.total_deaths += deaths
         self.mutations += new_mutations
         return {"births": births, "deaths": deaths, "mutations": new_mutations}
+
+    def genome_stats(self) -> dict[str, float]:
+        """Population means over living animals only; empty worlds use zero."""
+        mask = self.cells >= 2
+        if not np.any(mask):
+            return {"metabolism": 0.0, "sight": 0.0, "fertility": 0.0}
+        return {"metabolism": float(self.trait[mask].mean()),
+                "sight": float(self.sight[mask].mean()),
+                "fertility": float(self.fertility[mask].mean())}
 
     def counts(self) -> dict[str, int]:
         plants = int(np.count_nonzero(self.cells == 1))

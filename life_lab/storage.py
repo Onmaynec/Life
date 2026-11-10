@@ -10,7 +10,7 @@ import numpy as np
 from .world import CellularAutomaton, Ecosystem
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
 
 def save_world(world: CellularAutomaton | Ecosystem, path: str | Path) -> None:
@@ -28,7 +28,8 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path) -> None:
     if isinstance(world, CellularAutomaton):
         meta["rule"] = world.rule
     else:
-        arrays.update(energy=world.energy, trait=world.trait, nutrients=world.nutrients)
+        arrays.update(energy=world.energy, trait=world.trait, sight=world.sight,
+                      fertility=world.fertility, nutrients=world.nutrients)
         meta["mutations"] = world.mutations
         meta["rng_state"] = world._rng.bit_generator.state
     with open(path, "wb") as f:
@@ -38,7 +39,7 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path) -> None:
 def load_world(path: str | Path) -> CellularAutomaton | Ecosystem:
     with np.load(path, allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata"].item()))
-        if metadata.get("version") != FORMAT_VERSION:
+        if metadata.get("version") not in (1, FORMAT_VERSION):
             raise ValueError("Неподдерживаемая версия сохранения")
         w, h = int(metadata["width"]), int(metadata["height"])
         CellularAutomaton._validate_dimensions(w, h)
@@ -58,6 +59,12 @@ def load_world(path: str | Path) -> CellularAutomaton | Ecosystem:
                 if arr.shape != cells.shape or not np.isfinite(arr).all():
                     raise ValueError(f"Повреждённый массив: {key}")
                 getattr(world, key)[:] = arr
+            if metadata["version"] >= 2:
+                for key in ("sight", "fertility"):
+                    arr = archive[key]
+                    if arr.shape != cells.shape or not np.isfinite(arr).all():
+                        raise ValueError(f"Повреждённый массив: {key}")
+                    getattr(world, key)[:] = arr
             world.mutations = int(metadata.get("mutations", 0))
             if "rng_state" in metadata:
                 world._rng.bit_generator.state = metadata["rng_state"]
