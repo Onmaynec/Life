@@ -264,18 +264,15 @@ class Ecosystem:
         return True
 
     def _neighbours(self, x: int, y: int) -> list[tuple[int, int]]:
-        points = []
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0:
-                    continue
-                xx, yy = x + dx, y + dy
-                if self.wrap:
-                    xx %= self.width
-                    yy %= self.height
-                elif not (0 <= xx < self.width and 0 <= yy < self.height):
-                    continue
-                points.append((xx, yy))
+        """Eight neighbours in stable Moore scan order, shuffled exactly once."""
+        width, height = self.cells.shape[1], self.cells.shape[0]
+        scan = ((x-1,y-1),(x,y-1),(x+1,y-1),(x-1,y),(x+1,y),
+                (x-1,y+1),(x,y+1),(x+1,y+1))
+        if self.wrap:
+            points = [(xx % width, yy % height) for xx,yy in scan]
+        else:
+            points = [(xx,yy) for xx,yy in scan
+                      if 0 <= xx < width and 0 <= yy < height]
         self._rng.shuffle(points)
         return points
 

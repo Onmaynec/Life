@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+from functools import lru_cache
 
 # Mutations stay small. Restrained ranges prevent runaway numerical values.
 LIMITS = ((0.65, 1.45), (1.0, 3.0), (0.70, 1.35))
@@ -14,9 +15,17 @@ def evolve_genome(parent: tuple[float, float, float], rng: np.random.Generator) 
     mutated = False
     for value, bounds, sigma in zip(parent, LIMITS, SIGMAS):
         variation = float(rng.normal(0, sigma))
-        genes.append(float(np.clip(float(value) + variation, *bounds)))
+        genes.append(min(bounds[1], max(bounds[0], float(value) + variation)))
         mutated |= abs(variation) > sigma * 0.625
     return (genes[0], genes[1], genes[2]), mutated
+
+
+@lru_cache(maxsize=3)
+def _vision_offsets(radius: int) -> tuple[tuple[int, int, int], ...]:
+    """Immutable scan order; caching avoids rebuilding the same square per animal."""
+    return tuple((dx,dy,max(abs(dx),abs(dy)))
+                 for dy in range(-radius,radius+1)
+                 for dx in range(-radius,radius+1) if dx or dy)
 
 
 def select_food_step(cells: np.ndarray, x: int, y: int, food: int,
@@ -31,21 +40,17 @@ def select_food_step(cells: np.ndarray, x: int, y: int, food: int,
     radius = max(1, min(3, round(float(sight))))
     target: tuple[int, int] | None = None
     distance = radius + 1
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            if not dx and not dy:
-                continue
-            nx, ny = x + dx, y + dy
-            if wrap:
-                nx %= width
-                ny %= height
-            elif not (0 <= nx < width and 0 <= ny < height):
-                continue
-            if cells[ny, nx] != food:
-                continue
-            d = max(abs(dx), abs(dy))
-            if d < distance or (d == distance and rng.random() < 0.5):
-                target, distance = (nx, ny), d
+    for dx, dy, d in _vision_offsets(radius):
+        nx, ny = x + dx, y + dy
+        if wrap:
+            nx %= width
+            ny %= height
+        elif not (0 <= nx < width and 0 <= ny < height):
+            continue
+        if cells[ny, nx] != food:
+            continue
+        if d < distance or (d == distance and rng.random() < 0.5):
+            target, distance = (nx, ny), d
     if target is None:
         return options[0]
 

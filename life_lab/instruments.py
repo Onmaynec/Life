@@ -125,8 +125,26 @@ def measure(world: Any, events: dict[str, Any] | None = None,
     return rec
 
 
-def spatial_field(world: Any, name: str, *, max_side: int = 50) -> np.ndarray:
-    """Downsample bounded 2D source data for plotting without altering the world."""
+SPATIAL_UNITS = {
+    "Плотность": "доля поля", "Типы клеток": "код вида", "Соседи": "соседей",
+    "Энергия": "ед. энергии", "Минералы": "ед. минералов", "Влага": "%",
+    "Возраст": "поколений", "Метаболизм": "коэффициент", "Зрение": "клеток",
+    "Плодовитость": "коэффициент", "Семена": "количество", "Органика": "ед.",
+    "Токсины": "ед.", "Рельеф": "высота", "Глубина родословной": "поколений",
+}
+
+
+def spatial_field(world: Any, name: str, *, max_side: int = 50,
+                  aggregation: str = "mean") -> np.ndarray:
+    """Read-only spatial aggregation; preserve all source cells and output bounds.
+
+    ``mean`` is useful for concentrations, ``max`` exposes rare local peaks,
+    ``sum`` shows absolute quantities per tile. Edge tiles may be smaller.
+    """
+    if type(max_side) is not int or not 2 <= max_side <= 200:
+        raise ValueError("Детализация должна быть от 2 до 200")
+    if aggregation not in ("mean", "max", "sum"):
+        raise ValueError("Неизвестный тип агрегации")
     fields = {"Плотность": (world.cells > 0).astype(np.float32),
               "Типы клеток": world.cells.astype(np.float32),
               "Соседи": neighbour_counts(world.cells > 0,world.wrap).astype(np.float32)}
@@ -147,15 +165,17 @@ def spatial_field(world: Any, name: str, *, max_side: int = 50) -> np.ndarray:
                        "Плодовитость":np.where(world.cells >= 2,world.fertility,0)})
     if name not in fields:
         raise ValueError("Неизвестный пространственный показатель")
-    arr=fields[name]
-    # Average over tiles (rather than picking one pixel); preserves spatial structure.
-    h,w=arr.shape
+    arr = np.asarray(fields[name], dtype=np.float32)
+    h,w = arr.shape
     sy,sx=max(1, math.ceil(h/max_side)),max(1, math.ceil(w/max_side))
     H,W=math.ceil(h/sy),math.ceil(w/sx)
+    # Same tile boundaries for mean/max/sum, no interpolation or synthetic cells.
     out=np.empty((H,W),dtype=np.float32)
+    reducer={"mean":np.mean,"max":np.max,"sum":np.sum}[aggregation]
     for y in range(H):
+        row=arr[y*sy:min(h,(y+1)*sy)]
         for x in range(W):
-            out[y,x]=float(arr[y*sy:min(h,(y+1)*sy),x*sx:min(w,(x+1)*sx)].mean())
+            out[y,x]=float(reducer(row[:,x*sx:min(w,(x+1)*sx)]))
     return out
 
 

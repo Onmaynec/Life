@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from .ecology import EcologySettings, climate_values
-from .instruments import MEASURES, measure, spatial_field
+from .instruments import MEASURES, measure, spatial_field, SPATIAL_UNITS
 from .pattern_tools import transform, shift
 from .patterns import PATTERNS, pattern_array, place_pattern
 from .skins import skin
@@ -305,11 +305,18 @@ class ResearchWorkspace:
         top.pack(fill="x")
         field=tk.StringVar(value=self.field_name.get())
         style=tk.StringVar(value="Столбцы")
+        aggregation=tk.StringVar(value="Среднее")
+        detail=tk.StringVar(value="29 × 29")
+        last_key=[None]
         self.app._label(top,"ПОЛЕ",9).pack(side="left",padx=(0,5))
         selector=ttk.Combobox(top,textvariable=field,values=GRAPH_FIELDS,state="readonly",width=15,style="Lab.TCombobox")
         selector.pack(side="left",padx=(0,13))
         chosen=ttk.Combobox(top,textvariable=style,values=("Столбцы","Поверхность","Сетка"),state="readonly",width=14,style="Lab.TCombobox")
-        chosen.pack(side="left")
+        chosen.pack(side="left",padx=(0,8))
+        ttk.Combobox(top,textvariable=aggregation,values=("Среднее","Максимум","Сумма"),
+                     width=10,state="readonly",style="Lab.TCombobox").pack(side="left",padx=(0,8))
+        ttk.Combobox(top,textvariable=detail,values=("17 × 17","29 × 29","45 × 45","65 × 65"),
+                     width=10,state="readonly",style="Lab.TCombobox").pack(side="left")
         figure=Figure(figsize=(9.8,6.2),dpi=105,facecolor=self.colors.base)
         ax=figure.add_subplot(111,projection="3d",computed_zorder=False)
         canvas=FigureCanvasTkAgg(figure,master=window)
@@ -318,8 +325,14 @@ class ResearchWorkspace:
         tk.Label(window,text="ЛКМ на графике — вращение  ·  колесо — масштаб  ·  кнопка «Обновить данные» — новый снимок",
                  bg=self.colors.panel,fg=self.colors.muted,font=("Segoe UI",9),anchor="w",padx=14,pady=8).pack(fill="x",side="bottom")
         cmap=LinearSegmentedColormap.from_list("life",[self.colors.base,self.colors.border,self.colors.accent,"#FFF0BD"])
-        def redraw(*_args:Any) -> None:
-            data=spatial_field(self.app.world,field.get(),max_side=29)
+        def redraw(*_args:Any, force: bool = False) -> None:
+            key=(id(self.app.world),self.app.world.generation,field.get(),style.get(),
+                 aggregation.get(),detail.get())
+            if key == last_key[0] and not force:
+                return
+            last_key[0] = key
+            method={"Среднее":"mean","Максимум":"max","Сумма":"sum"}[aggregation.get()]
+            data=spatial_field(self.app.world,field.get(),max_side=int(detail.get().split()[0]),aggregation=method)
             yy,xx=np.indices(data.shape)
             elevation, azimuth = ax.elev, ax.azim
             ax.clear()
@@ -339,16 +352,20 @@ class ResearchWorkspace:
                 ax.plot_surface(xx,yy,data,cmap=cmap,linewidth=0,antialiased=True,alpha=0.97)
             else:
                 ax.plot_wireframe(xx,yy,data,rstride=1,cstride=1,color=self.colors.accent,linewidth=.8)
-            ax.set_title(f"{field.get()} · поколение {self.app.world.generation}",color=self.colors.text,pad=18)
+            unit=SPATIAL_UNITS.get(field.get(),"ед.")
+            ax.set_title(f"{field.get()} · g{self.app.world.generation} · {aggregation.get().lower()} · {unit}",
+                         color=self.colors.text,pad=18)
             ax.set_xlabel("X",color=self.colors.muted)
             ax.set_ylabel("Y",color=self.colors.muted)
-            ax.set_zlabel(field.get(),color=self.colors.muted)
+            ax.set_zlabel(f"{field.get()} ({unit})",color=self.colors.muted)
             ax.view_init(elev=elevation,azim=azimuth)
             figure.tight_layout(pad=2)
             canvas.draw_idle()
         selector.bind("<<ComboboxSelected>>",redraw)
         chosen.bind("<<ComboboxSelected>>",redraw)
-        self.app._button(top,"ОБНОВИТЬ ДАННЫЕ",redraw).pack(side="left",padx=(10,0))
+        for var in (aggregation,detail):
+            var.trace_add("write",lambda *_:redraw())
+        self.app._button(top,"ОБНОВИТЬ ДАННЫЕ",lambda:redraw(force=True)).pack(side="left",padx=(10,0))
         def reset_camera():
             ax.view_init(elev=33,azim=-52)
             canvas.draw_idle()
@@ -571,6 +588,7 @@ class ResearchWorkspace:
         self.selected_pedigree.pack(fill="x",pady=(6,10))
         self.app._button(page,"ВЫБРАТЬ ПОД КУРСОРОМ",self.select_under_pointer,accent=True).pack(fill="x",pady=2)
         self.app._button(page,"ЭКСПОРТ РОДОСЛОВНЫХ CSV",self.export_pedigree).pack(fill="x",pady=2)
+        self.app._button(page,"СРАВНИТЬ ЛИНИИ И КАРТА ГЕНОВ",self.open_lineage_comparison,accent=True).pack(fill="x",pady=2)
         self.app._label(page,"Доступны происхождение, геном при рождении, число потомков и причина смерти. Регистр старых умерших может сокращаться после 50 000 записей.",8).pack(fill="x",pady=(8,0))
 
     def select_animal(self, x: int, y: int) -> None:
@@ -629,6 +647,13 @@ class ResearchWorkspace:
                                     fill=self.colors.accent,outline="")
             canvas.create_text(x0+slot/2,height-10,text=f"{i}" if i<8 else "8+",
                                fill=self.colors.muted,font=("Segoe UI",8))
+
+    def open_lineage_comparison(self) -> None:
+        if not isinstance(self.app.world, Ecosystem):
+            self.app._show_hint("Сравнение доступно только в экосистеме")
+            return
+        from .lineage_compare_ui import LineageComparison
+        LineageComparison(self.app)
 
     def _refresh_lineage(self) -> None:
         world = self.app.world

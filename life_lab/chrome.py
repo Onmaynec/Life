@@ -1,36 +1,48 @@
-"""Native Windows title bar colours, with no borderless-window emulation."""
+"""Windows native caption styling with conservative DWM fallbacks.
+
+Keep the system border, accessibility keys, resize handles and window controls.
+No custom frameless overlays are used. Unsupported DWM attributes are no-ops.
+"""
 from __future__ import annotations
 
 import sys
 
 
-def dark_titlebar(window: object, background: str = "#101114") -> bool:
-    """Apply DWM dark caption when available; safe no-op outside Windows.
+def _rgb(background: str) -> int:
+    if not isinstance(background, str) or len(background) != 7 or not background.startswith("#"):
+        raise ValueError("Цвет должен быть в формате #RRGGBB")
+    r, g, b = (int(background[i:i+2],16) for i in (1,3,5))
+    return r | (g << 8) | (b << 16)
 
-    Windows 11 also supports explicit caption colour (attribute 35). The native
-    resize border and window controls remain owned by the OS.
-    """
+
+def dark_titlebar(window: object, background: str = "#101114") -> bool:
     if sys.platform != "win32":
         return False
     try:
         import ctypes
         from ctypes import wintypes
         window.update_idletasks()
-        # Tk may give the child content HWND; GetParent resolves its toplevel.
-        parent = ctypes.windll.user32.GetParent
-        parent.argtypes = [wintypes.HWND]
-        parent.restype = wintypes.HWND
-        hwnd = parent(window.winfo_id()) or window.winfo_id()
+        user32 = ctypes.windll.user32
+        ancestor = user32.GetAncestor
+        ancestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        ancestor.restype = wintypes.HWND
+        hwnd = ancestor(window.winfo_id(), 2) or window.winfo_id()  # GA_ROOT
+        if not hwnd:
+            return False
         dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
-        dwm.argtypes = [wintypes.HWND,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD]
+        dwm.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
         dwm.restype = ctypes.c_long
-        active = wintypes.BOOL(1)
-        result = dwm(hwnd, 20, ctypes.byref(active), ctypes.sizeof(active))
-        if result != 0:
-            result = dwm(hwnd, 19, ctypes.byref(active), ctypes.sizeof(active))
-        r, g, b = (int(background[i:i+2], 16) for i in (1, 3, 5))
-        caption = wintypes.DWORD(r | (g << 8) | (b << 16))
-        dwm(hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
-        return result == 0
-    except (OSError, ValueError, AttributeError, TypeError):
+
+        def set_attr(attribute: int, value: int) -> bool:
+            data = wintypes.DWORD(value)
+            return dwm(hwnd, attribute, ctypes.byref(data), ctypes.sizeof(data)) == 0
+
+        # Attr 20 on modern Windows, 19 on older Windows 10 builds.
+        dark = set_attr(20, 1) or set_attr(19, 1)
+        # Explicit caption and text are supported by some Win11 builds.
+        caption = set_attr(35, _rgb(background))
+        if caption:
+            set_attr(36, 0xFFFFFF)  # readable white native caption text
+        return dark or caption
+    except (OSError, ValueError, AttributeError, TypeError, OverflowError):
         return False

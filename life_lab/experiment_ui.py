@@ -201,7 +201,7 @@ class ExperimentStudio:
         footer=tk.Frame(self.window,bg=c.panel,padx=16,pady=11)
         footer.pack(fill="x",side="bottom",before=content)
         for label, callback in (("ИТОГИ CSV",self.export_summary),("РЯДЫ CSV",self.export_series),
-                                ("ПОЛНЫЙ JSON",self.export_json),("ОТЧЁТ MD",self.export_report)):
+                                ("ПОЛНЫЙ JSON",self.export_json),("СРАВНИТЬ JSON",self.open_archives),("ОТЧЁТ MD",self.export_report)):
             self._button(footer,label,callback).pack(side="left",padx=(0,9))
         tk.Label(footer,text="Сравнение относительное: первый вариант — базовый; σ — выборочное отклонение.",
                  fg=c.muted,bg=c.panel,font=("Segoe UI",8)).pack(side="right")
@@ -459,6 +459,10 @@ class ExperimentStudio:
 
     def export_report(self)->None:
         self._export("report")
+
+    def open_archives(self)->None:
+        from .archive_ui import ArchiveComparison
+        ArchiveComparison(self.app)
 
     def close(self)->None:
         if self._pump_id is not None:

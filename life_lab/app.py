@@ -19,6 +19,7 @@ from .storage import load_document, load_research, save_world
 from .history import ExperimentHistory
 from .instruments import ResearchLog
 from .chrome import dark_titlebar
+from .layout import window_dimensions, permitted_panels, dialog_dimensions
 from .skins import SKINS, skin
 from .research_ui import ResearchWorkspace
 from .experiment_ui import ExperimentStudio
@@ -63,11 +64,12 @@ class LifeLabApp:
         self._set_colors(preferences.skin)
         self.root.title(f"Life  —  v{__version__}")
         screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        window_w, window_h = min(1570, max(890, screen_w-80)), min(950, max(660, screen_h-110))
+        window_w, window_h = window_dimensions(screen_w, screen_h)
         self.root.geometry(f"{window_w}x{window_h}")
-        self.root.minsize(880, 640)
-        self.left_visible = window_w >= 1200
-        self.right_visible = window_w >= 1400
+        self.root.minsize(780, 490)
+        self.left_visible = permitted_panels(window_w) >= 1
+        self.right_visible = permitted_panels(window_w) >= 2
+        self._last_layout_width = window_w
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(80, lambda: dark_titlebar(self.root, BG))
@@ -294,12 +296,19 @@ class LifeLabApp:
         self._button(actions, "?", self.show_help, width=3).pack(side="left", padx=(0, 7))
         self._button(actions, "+  НОВЫЙ МИР", self.new_world_dialog).pack(side="left", padx=(0, 8))
         self._button(actions, "СОХРАНИТЬ", self.save).pack(side="left", padx=(0, 16))
-        self._label(actions, "ШАГОВ / СЕК", 9, MUTED, True).pack(side="left", padx=(0, 7))
-        self._button(actions, "−", lambda: self._adjust_speed(-1), width=3).pack(side="left")
-        tk.Label(actions, textvariable=self.speed_var, bg=PANEL_2, fg=TEXT,
-                 width=3, font=(FONT, 11, "bold"), pady=9).pack(side="left", padx=3)
-        self._button(actions, "+", lambda: self._adjust_speed(1), width=3).pack(side="left", padx=(0, 16))
-        self._button(actions, "ОДИН ШАГ", self.step_once).pack(side="left", padx=(0, 8))
+        speed_caption=self._label(actions, "ШАГОВ / СЕК", 9, MUTED, True)
+        speed_caption.pack(side="left", padx=(0, 7))
+        minus_speed=self._button(actions, "−", lambda: self._adjust_speed(-1), width=3)
+        minus_speed.pack(side="left")
+        speed_value=tk.Label(actions, textvariable=self.speed_var, bg=PANEL_2, fg=TEXT,
+                             width=3, font=(FONT, 11, "bold"), pady=9)
+        speed_value.pack(side="left", padx=3)
+        plus_speed=self._button(actions, "+", lambda: self._adjust_speed(1), width=3)
+        plus_speed.pack(side="left", padx=(0, 16))
+        step_button=self._button(actions, "ОДИН ШАГ", self.step_once)
+        step_button.pack(side="left", padx=(0, 8))
+        self._compact_action_widgets=(speed_caption,minus_speed,speed_value,plus_speed,step_button)
+        self._actions_compact=False
         self.run_button = self._button(actions, "▶  ЗАПУСТИТЬ", self.toggle_run, accent=True)
         self.run_button.pack(side="left")
 
@@ -560,6 +569,8 @@ class LifeLabApp:
         self.performance_label = self._label(status, "", 9, GREEN)
         self.performance_label.pack(side="right")
         self.root.bind_all("<MouseWheel>", self._wheel_panels)
+        self.root.bind("<Configure>", self._on_window_resize, add="+")
+        self._update_action_toolbar(self.root.winfo_width())
         self._sync_panel_visibility()
 
     def _bind_events(self) -> None:
@@ -570,6 +581,8 @@ class LifeLabApp:
         self.root.bind_all("<F6>",lambda _e:self.toggle_panel("left"))
         self.root.bind_all("<F7>",lambda _e:self.toggle_panel("right"))
         self.root.bind_all("<Control-Tab>", lambda _e:self.next_research_tab())
+        self.root.bind_all("<Control-Up>", lambda _e:self._adjust_speed(1))
+        self.root.bind_all("<Control-Down>", lambda _e:self._adjust_speed(-1))
         # File operations are deliberately allowed when a text field has focus.
         self.root.bind_all("<Control-s>", lambda _e: self.save())
         self.root.bind_all("<Control-o>", lambda _e: self.load())
@@ -626,6 +639,35 @@ class LifeLabApp:
         self.open_experiment_studio()
         return "break"
 
+    def _update_action_toolbar(self, width: int) -> None:
+        compact=width<900
+        if compact == self._actions_compact:
+            return
+        self._actions_compact=compact
+        if compact:
+            for widget in self._compact_action_widgets:
+                widget.pack_forget()
+        else:
+            for widget in self._compact_action_widgets:
+                widget.pack(side="left",before=self.run_button,padx=(0,4))
+
+    def _on_window_resize(self, event: tk.Event[Any]) -> None:
+        if event.widget is not self.root or not hasattr(self,"left_shell"):
+            return
+        width = int(event.width)
+        self._update_action_toolbar(width)
+        if abs(width-self._last_layout_width) < 15:
+            return
+        self._last_layout_width = width
+        count = permitted_panels(width)
+        if count == 0 and (self.left_visible or self.right_visible):
+            self.left_visible = self.right_visible = False
+            self._sync_panel_visibility()
+        elif count == 1 and self.left_visible and self.right_visible:
+            self.right_visible = False
+            self._sync_panel_visibility()
+        # Expansion never forces panels open: explicit user preference wins.
+
     def _sync_panel_visibility(self) -> None:
         """Keep both sidebars independently collapsible without losing widget state."""
         for shell,visible,side,pad in (
@@ -643,7 +685,7 @@ class LifeLabApp:
         self._mark_dirty()
 
     def toggle_panel(self, side: str) -> None:
-        compact=self.root.winfo_width()<1320
+        compact=permitted_panels(self.root.winfo_width()) < 2
         if side=="left":
             self.left_visible=not self.left_visible
             if compact and self.left_visible:
@@ -898,11 +940,11 @@ class LifeLabApp:
         """Configure and replace the current world after validating every field."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Новый мир — Life")
-        dw, dh = 470, 650
+        dw, dh = dialog_dimensions(self.root.winfo_screenwidth(),self.root.winfo_screenheight(),470,650)
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width()-dw)//2)
         y = self.root.winfo_rooty() + max(0, (self.root.winfo_height()-dh)//2)
         dialog.geometry(f"{dw}x{dh}+{x}+{y}")
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
         dialog.configure(bg=PANEL)
         dialog.after(80, lambda: dark_titlebar(dialog, BG))
         dialog.transient(self.root)
@@ -919,8 +961,22 @@ class LifeLabApp:
         herbivores = tk.StringVar(value="1.8")
         predators = tk.StringVar(value="0.3")
 
-        frame = tk.Frame(dialog, bg=PANEL, padx=23, pady=16)
-        frame.pack(fill="both", expand=True)
+        viewport = tk.Frame(dialog,bg=PANEL)
+        viewport.pack(fill="both",expand=True)
+        scroller = tk.Canvas(viewport,bg=PANEL,highlightthickness=0)
+        scroll_y = ttk.Scrollbar(viewport,orient="vertical",command=scroller.yview)
+        scroller.configure(yscrollcommand=scroll_y.set)
+        scroll_y.pack(side="right",fill="y")
+        scroller.pack(side="left",fill="both",expand=True)
+        frame = tk.Frame(scroller, bg=PANEL, padx=23, pady=16)
+        item = scroller.create_window((0,0),window=frame,anchor="nw")
+        frame.bind("<Configure>",lambda _e: scroller.configure(scrollregion=scroller.bbox("all")))
+        scroller.bind("<Configure>",lambda e:scroller.itemconfigure(item,width=e.width))
+        def scroll_dialog(event: tk.Event[Any]) -> None:
+            if event.delta:
+                scroller.yview_scroll(-int(event.delta/120) or (-1 if event.delta>0 else 1),"units")
+            return "break"
+        dialog.bind("<MouseWheel>",scroll_dialog)
         self._label(frame, "НОВЫЙ МИР", 17, TEXT, True).pack(anchor="w", pady=(0, 3))
         self._label(frame, "Задайте начальные условия эксперимента", 10, MUTED).pack(anchor="w", pady=(0, 12))
         tk.Frame(frame, height=1, bg=EDGE).pack(fill="x", pady=(0, 10))

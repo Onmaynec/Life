@@ -1,0 +1,39 @@
+name: Windows package verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies and packager
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt "pyinstaller>=6,<7"
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Build standalone onedir package
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name Life --hidden-import matplotlib.backends.backend_tkagg --hidden-import mpl_toolkits.mplot3d main.py
+      - name: Smoke-test bundled executable (no Python CLI)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath '.\dist\Life\Life.exe' -ArgumentList '--smoke-test' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Bundled executable smoke test failed: $($p.ExitCode)" }
+      - name: Upload Windows package for manual acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: Life-Windows-x64-acceptance
+          path: dist/Life/
+          if-no-files-found: error
