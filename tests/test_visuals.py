@@ -84,7 +84,7 @@ class PreferencesTests(unittest.TestCase):
     def test_wrong_values_are_repaired(self):
         actual = Preferences.from_dict({"palette": "неизвестная", "style": "Мозаика",
                                         "grid": "false", "trails": True, "speed": -5})
-        self.assertEqual(actual.palette, "Аврора")
+        self.assertEqual(actual.palette, "Графит")
         self.assertEqual(actual.style, "Мозаика")
         self.assertTrue(actual.grid)
         self.assertEqual(actual.speed, 8)
