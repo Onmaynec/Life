@@ -37,11 +37,13 @@ METRIC_TITLES: dict[str, str] = {
     "birth_rate":"Рождения, %", "death_rate":"Смерти, %",
     "organic":"Органика", "toxins":"Токсины", "seed_bank":"Банк семян",
     "altitude":"Средняя высота",
+    "families":"Активные родовые линии", "lineage_depth":"Макс. колено",
+    "mean_lineage_depth":"Среднее колено", "pedigree_records":"Записи родословной",
 }
 LABEL_TO_METRIC = {label:key for key,label in METRIC_TITLES.items()}
 GRAPH_FIELDS = ["Плотность", "Типы клеток", "Соседи", "Энергия", "Минералы", "Влага",
                 "Возраст", "Метаболизм", "Зрение", "Плодовитость",
-                "Семена", "Органика", "Токсины", "Рельеф"]
+                "Семена", "Органика", "Токсины", "Рельеф", "Глубина родословной"]
 
 
 def formatted(value: object) -> str:
@@ -61,6 +63,7 @@ class ResearchWorkspace:
         self.pages: dict[str, tk.Frame] = {}
         self.tab_buttons: dict[str, tk.Button] = {}
         self.current = "Обзор"
+        self.selected_id: int | None = None
         self.last_refresh = -1
         self.baseline: dict[str,float | int | None] | None = None
         self.pattern_selected = "Глайдер"
@@ -71,18 +74,21 @@ class ResearchWorkspace:
         self.metric_name = tk.StringVar(value="Численность")
         self.tabs = tk.Frame(host, bg=self.colors.panel)
         self.tabs.pack(fill="x", pady=(0, 11))
-        for name in ("Обзор","Анализ","3D","Среда","Каталог"):
+        for index, name in enumerate(("Обзор","Анализ","3D","Среда","Каталог","Родословная")):
             button = app._button(self.tabs, name.upper(), lambda n=name:self.show(n))
             button.configure(font=("Segoe UI",8,"bold"),padx=4,pady=8)
-            button.pack(side="left",expand=True,fill="x",padx=1)
+            button.grid(row=index // 3,column=index % 3,sticky="ew",padx=2,pady=2)
             self.tab_buttons[name]=button
             self.pages[name]=tk.Frame(host,bg=self.colors.panel)
+        for column in range(3):
+            self.tabs.columnconfigure(column, weight=1)
         self.overview = self.pages["Обзор"]
         self.overview.pack(fill="both")
         self._build_analysis()
         self._build_3d()
         self._build_environment()
         self._build_library()
+        self._build_lineage()
         self._select_tab()
 
     def _heading(self, parent: tk.Frame, title: str, description: str = "") -> None:
@@ -535,6 +541,128 @@ class ResearchWorkspace:
         self.app._mark_dirty()
         self.app._update_stats()
 
+    def _build_lineage(self) -> None:
+        page = self.pages["Родословная"]
+        self._heading(page,"РОДОСЛОВНЫЕ", "Регистр животных: ID сохраняется при перемещении, потомки наследуют линию основателя. Ctrl+ЛКМ по животному — выбрать его.")
+        self.pedigree_summary = tk.Label(page, text="", bg=self.colors.surface,
+                         fg=self.colors.text, font=("Consolas",10), anchor="w",
+                         justify="left", wraplength=245,padx=9,pady=12)
+        self.pedigree_summary.pack(fill="x",pady=(0,12))
+        self.app._label(page,"ГЛУБИНА РОДОСЛОВНЫХ",9,self.colors.muted,True).pack(anchor="w")
+        self.pedigree_chart = tk.Canvas(page,height=126,bg=self.colors.base,highlightthickness=0)
+        self.pedigree_chart.pack(fill="x",pady=(7,12))
+        self.pedigree_chart.bind("<Configure>",lambda _e:self._draw_pedigree_depth())
+        self.app._label(page,"КРУПНЕЙШИЕ ЛИНИИ",9,self.colors.muted,True).pack(anchor="w")
+        self.family_ranking = tk.Label(page, text="", fg=self.colors.text,bg=self.colors.panel,
+                                      anchor="w",justify="left",font=("Consolas",9))
+        self.family_ranking.pack(fill="x",pady=(6,13))
+        self.app._label(page,"ВЫБРАННОЕ ЖИВОТНОЕ",9,self.colors.muted,True).pack(anchor="w")
+        self.selected_pedigree = tk.Label(page,text="",fg=self.colors.text,bg=self.colors.surface,
+                                         anchor="nw",justify="left",wraplength=238,
+                                         font=("Segoe UI",9),padx=9,pady=10)
+        self.selected_pedigree.pack(fill="x",pady=(6,10))
+        self.app._button(page,"ВЫБРАТЬ ПОД КУРСОРОМ",self.select_under_pointer,accent=True).pack(fill="x",pady=2)
+        self.app._button(page,"ЭКСПОРТ РОДОСЛОВНЫХ CSV",self.export_pedigree).pack(fill="x",pady=2)
+        self.app._label(page,"Доступны происхождение, геном при рождении, число потомков и причина смерти. Регистр старых умерших может сокращаться после 50 000 записей.",8).pack(fill="x",pady=(8,0))
+
+    def select_animal(self, x: int, y: int) -> None:
+        world = self.app.world
+        if not isinstance(world, Ecosystem) or not (0 <= x < world.width and 0 <= y < world.height):
+            self.app._show_hint("Выбор родословной доступен в экосистеме")
+            return
+        record = world.lineage.get(y, x)
+        if record is None:
+            self.app._show_hint("На выбранной клетке нет животного")
+            return
+        self.selected_id = record.id
+        self.show("Родословная")
+        self.app._show_hint(f"Выбрано животное #{record.id}; линия #{record.founder}")
+
+    def select_under_pointer(self) -> None:
+        point = self.app.pointer
+        if point:
+            self.select_animal(*point)
+        else:
+            self.app._show_hint("Навести курсор на животное и нажать кнопку")
+
+    def export_pedigree(self) -> None:
+        if not isinstance(self.app.world, Ecosystem):
+            self.app._show_hint("Родословная есть только в экосистеме")
+            return
+        filename = filedialog.asksaveasfilename(defaultextension=".csv",filetypes=[("CSV","*.csv")],
+                                                title="Экспорт родословной")
+        if filename:
+            try:
+                self.app.world.lineage.export_csv(filename)
+                self.app._show_hint(f"Родословная сохранена: {Path(filename).name}")
+            except OSError as exc:
+                messagebox.showerror("Ошибка экспорта",str(exc))
+
+    def _draw_pedigree_depth(self) -> None:
+        if not hasattr(self,"pedigree_chart"):
+            return
+        canvas = self.pedigree_chart
+        canvas.delete("all")
+        world = self.app.world
+        if not isinstance(world, Ecosystem):
+            return
+        counts = [0] * 9
+        for uid in world.lineage.ids.flat:
+            if uid:
+                counts[min(world.lineage.records[int(uid)].depth,8)] += 1
+        width = max(150,canvas.winfo_width())
+        height = max(125,canvas.winfo_height())
+        high = max(counts) or 1
+        slot = (width - 24) / len(counts)
+        for i, count in enumerate(counts):
+            x0 = 12 + i * slot
+            bar = (height - 34) * count / high
+            canvas.create_rectangle(x0+2,height-21-bar,x0+slot-3,height-21,
+                                    fill=self.colors.accent,outline="")
+            canvas.create_text(x0+slot/2,height-10,text=f"{i}" if i<8 else "8+",
+                               fill=self.colors.muted,font=("Segoe UI",8))
+
+    def _refresh_lineage(self) -> None:
+        world = self.app.world
+        if not isinstance(world,Ecosystem):
+            self.pedigree_summary.config(text="Для просмотра родословных откройте режим экосистемы.")
+            self.family_ranking.config(text="")
+            self.selected_pedigree.config(text="")
+            self.pedigree_chart.delete("all")
+            return
+        ledger = world.lineage
+        report = ledger.summary()
+        self.pedigree_summary.config(text=(
+            f"Живых животных:  {report['living']:,}\n"
+            f"Активных линий: {report['families']:,}\n"
+            f"Макс. колено:    {report['max_depth']}\n"
+            f"Среднее колено:  {report['mean_depth']:.2f}\n"
+            f"Записей в реестре: {report['recorded']:,}\n"
+            f"Удалено из архива: {report['pruned']:,}"))
+        families = ledger.dominant_families(8)
+        self.family_ranking.config(text="\n".join(f"#{uid:<7} {count:>5} живых   g{depth}"
+                                                   for uid,count,depth in families)
+                                   or "Нет живых животных")
+        self._draw_pedigree_depth()
+        chosen = ledger.records.get(self.selected_id) if self.selected_id is not None else None
+        if chosen is None:
+            self.selected_pedigree.config(text="Нажмите Ctrl+ЛКМ по животному на карте. Его ID и родители появятся здесь.")
+            return
+        ancestry = ledger.ancestors(chosen.id, 9)
+        current_positions = np.argwhere(ledger.ids==chosen.id)
+        location = (f"{int(current_positions[0,1])}:{int(current_positions[0,0])}"
+                    if len(current_positions) else "не живёт")
+        description = (f"ID #{chosen.id} · {'Травоядное' if chosen.species==2 else 'Хищник'}\n"
+                       f"Состояние: {'жив' if chosen.died is None else 'погиб'}  ·  {location}\n"
+                       f"Рождение: g{chosen.born}  ·  {'Смерть: g'+str(chosen.died) if chosen.died is not None else 'Возраст линии: '+str(world.generation-chosen.born)}\n"
+                       f"Причина смерти: {chosen.cause or '—'}\n"
+                       f"Основатель: #{chosen.founder} · Колено: {chosen.depth}\n"
+                       f"Прямых потомков: {chosen.offspring}\n"
+                       f"Мутация: {'да' if chosen.mutated else 'нет'}\n"
+                       f"Геном при рождении: {chosen.genome[0]:.2f} / {chosen.genome[1]:.2f} / {chosen.genome[2]:.2f}\n"
+                       f"Цепочка предков: {' ← '.join('#'+str(a.id) for a in ancestry)}")
+        self.selected_pedigree.config(text=description)
+
     def refresh(self,force:bool=False)->None:
         w=self.app.world
         if not force and self.last_refresh==w.generation:
@@ -559,6 +687,8 @@ class ResearchWorkspace:
             self.update_preview()
         elif self.current=="Среда":
             self._show_climate()
+        elif self.current=="Родословная":
+            self._refresh_lineage()
 
     def check_extinction(self)->bool:
         if not self.alert_extinction.get() or not isinstance(self.app.world,Ecosystem):

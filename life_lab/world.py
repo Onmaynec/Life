@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from .genetics import evolve_genome, select_food_step
+from .lineage import Pedigree
 from .ecology import EcologySettings, environmental_step
 
 
@@ -175,6 +176,7 @@ class Ecosystem:
         self.toxins = np.zeros((height, width), dtype=np.float32)
         self.altitude = np.full((height, width),0.50,dtype=np.float32)
         self.ecology = EcologySettings()
+        self.lineage = Pedigree(self.cells.shape)
         self.generation = 0
         self.wrap = wrap
         self._rng = np.random.default_rng(seed)
@@ -205,6 +207,7 @@ class Ecosystem:
         self.organic.fill(0)
         self.toxins.fill(0)
         self.altitude.fill(.50)
+        self.lineage.reset()
         self.generation = 0
         self.last_births = self.last_deaths = self.mutations = 0
         self.total_births = self.total_deaths = 0
@@ -234,10 +237,21 @@ class Ecosystem:
         gy,gx=np.indices(self.cells.shape,dtype=np.float32)
         elevation = .5+.18*np.sin(gx*.035)+.16*np.cos(gy*.05)+self._rng.normal(0,.05,self.cells.shape)
         self.altitude[:]=np.clip(elevation,0,1).astype(np.float32)
+        # Every initial animal is a founder. Registration consumes no random draws.
+        self.rebuild_lineage()
+
+    def rebuild_lineage(self) -> None:
+        """Start a new family for each existing animal (legacy save migration)."""
+        self.lineage.reset()
+        for yy, xx in np.argwhere(self.cells >= 2):
+            y, x = int(yy), int(xx)
+            self.lineage.founder(y, x, int(self.cells[y, x]), self.generation,
+                                 (self.trait[y, x], self.sight[y, x], self.fertility[y, x]))
 
     def paint(self, x: int, y: int, kind: int = 1) -> bool:
         if not (0 <= x < self.width and 0 <= y < self.height and 0 <= kind <= 3):
             return False
+        self.lineage.die(y, x, self.generation, "редактор")
         self.cells[y, x] = kind
         self.energy[y, x] = SPECIES[kind].initial_energy if kind in (2, 3) else 0.0
         self.trait[y, x] = 1.0
@@ -245,6 +259,8 @@ class Ecosystem:
         self.fertility[y, x] = 1.0
         self.age[y, x] = 0
         self.seeds[y, x] = 0
+        if kind >= 2:
+            self.lineage.founder(y, x, kind, self.generation, (1.0, 2.0, 1.0))
         return True
 
     def _neighbours(self, x: int, y: int) -> list[tuple[int, int]]:
@@ -314,6 +330,7 @@ class Ecosystem:
                         life_cost *= 1.30
                 self.energy[y,x] -= life_cost
                 if self.energy[y, x] <= 0:
+                    self.lineage.die(y, x, self.generation + 1, "голод")
                     cells[y, x] = 0
                     self.energy[y, x] = 0
                     self.trait[y, x] = 1
@@ -334,6 +351,8 @@ class Ecosystem:
                 elif food:
                     destination = food[0]
                     deaths += 1  # Prey eaten; never counted as surviving.
+                    if prey_kind >= 2:
+                        self.lineage.die(destination[1], destination[0], self.generation + 1, "хищник")
                     bonus=1.0
                     if self.ecology.enabled and self.ecology.pack_hunt and kind==3:
                         bonus += 0.12*sum(cells[ny,nx]==3 for nx,ny in nearby)
@@ -345,6 +364,7 @@ class Ecosystem:
                         destination = select_food_step(cells, x, y, prey_kind, sight, empty, self.wrap, rng)
                 if destination is not None:
                     nx, ny = destination
+                    self.lineage.move(y, x, ny, nx)
                     cells[ny, nx] = kind
                     self.energy[ny, nx] = self.energy[y, x]
                     self.trait[ny, nx] = self.trait[y, x]
@@ -377,6 +397,8 @@ class Ecosystem:
                                                           self.fertility[y, x]), rng)
                         self.trait[ny, nx], self.sight[ny, nx], self.fertility[ny, nx] = genome
                         self.age[ny, nx] = 0
+                        self.lineage.child(ny, nx, kind, self.generation + 1, genome,
+                                           int(self.lineage.ids[y, x]), changed)
                         new_mutations += int(changed)
                         births += 1
 
@@ -388,6 +410,9 @@ class Ecosystem:
         environmental = environmental_step(self)
         return {"births": self.last_births, "deaths": self.last_deaths,
                 "mutations": new_mutations, **environmental}
+
+    def pedigree_stats(self) -> dict[str, float | int]:
+        return self.lineage.summary()
 
     def genome_stats(self) -> dict[str, float]:
         """Population means over living animals only; empty worlds use zero."""

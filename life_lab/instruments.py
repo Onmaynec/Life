@@ -21,6 +21,7 @@ MEASURES = (
     "mean_metabolism", "mean_sight", "mean_fertility", "sunlight", "temperature",
     "plant_biomass", "animal_biomass", "predator_prey_ratio", "birth_rate", "death_rate",
     "organic", "toxins", "seed_bank", "altitude",
+    "families", "lineage_depth", "mean_lineage_depth", "pedigree_records",
 )
 
 
@@ -86,11 +87,17 @@ def measure(world: Any, events: dict[str, Any] | None = None,
         "mean_age": None, "max_age": None, "mean_metabolism": None,
         "mean_sight": None, "mean_fertility": None,
         "sunlight": None, "temperature": None,
+        "families": None, "lineage_depth": None,
+        "mean_lineage_depth": None, "pedigree_records": None,
         "plant_biomass": int(counts[1]), "animal_biomass": 0,
         "predator_prey_ratio": None, "birth_rate": 100 * int(e.get("births",0))/max(1,pop),
         "death_rate": 100 * int(e.get("deaths",0))/max(1,pop),
     }
     if isinstance(world,Ecosystem):
+        pedigree = world.lineage.summary()
+        rec.update(families=pedigree["families"], lineage_depth=pedigree["max_depth"],
+                   mean_lineage_depth=pedigree["mean_depth"],
+                   pedigree_records=pedigree["recorded"])
         animals = cells >= 2
         herb = cells == 2
         pred = cells == 3
@@ -124,6 +131,12 @@ def spatial_field(world: Any, name: str, *, max_side: int = 50) -> np.ndarray:
               "Типы клеток": world.cells.astype(np.float32),
               "Соседи": neighbour_counts(world.cells > 0,world.wrap).astype(np.float32)}
     if isinstance(world,Ecosystem):
+        depth = np.zeros_like(world.cells, dtype=np.float32)
+        for yy, xx in np.argwhere(world.cells >= 2):
+            rec = world.lineage.get(int(yy), int(xx))
+            if rec is not None:
+                depth[yy, xx] = rec.depth
+        fields["Глубина родословной"] = depth
         fields.update({"Энергия":world.energy,"Минералы":world.nutrients,
                        "Влага":world.moisture,"Возраст":world.age.astype(np.float32),
                        "Семена":world.seeds.astype(np.float32),
@@ -176,8 +189,13 @@ class ResearchLog:
             raise ValueError("Повреждённый исследовательский журнал")
         prev=-1
         for entry in data:
-            if not isinstance(entry,dict) or set(entry) != set(MEASURES):
+            if not isinstance(entry,dict):
                 raise ValueError("Неизвестные показатели исследования")
+            old_keys = {"families", "lineage_depth", "mean_lineage_depth", "pedigree_records"}
+            if not set(entry).issubset(MEASURES) or (set(MEASURES)-set(entry)) - old_keys:
+                raise ValueError("Неизвестные показатели исследования")
+            for key in old_keys:
+                entry.setdefault(key, None)
             g=entry.get("generation")
             if type(g) is not int or g <= prev:
                 raise ValueError("Неверные поколения")

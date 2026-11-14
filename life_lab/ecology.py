@@ -227,6 +227,7 @@ def environmental_step(world: Any) -> dict[str, int]:
             for y,x in moved[:min(len(moved),30)]:
                 ny,nx=int(y+dy),int(x+dx)
                 if 0 <= ny < world.height and 0 <= nx < world.width and cells[ny,nx] == 0 and wet[ny,nx] > wet[y,x]:
+                    world.lineage.move(int(y), int(x), ny, nx)
                     cells[ny,nx] = 2;cells[y,x]=0
                     for field,initial in ((world.energy,0),(world.age,0),(world.trait,1),(world.sight,2),(world.fertility,1)):
                         field[ny,nx]=field[y,x];field[y,x]=initial
@@ -249,6 +250,8 @@ def environmental_step(world: Any) -> dict[str, int]:
         minerals[dead] += np.where(cells[dead] == 1, 4.5, 11.0)
         if settings.organic_cycle:
             world.organic[dead] += np.where(cells[dead] == 1, 3.0, 6.0)
+    for y, x in np.argwhere(dead & (cells >= 2)):
+        world.lineage.die(int(y), int(x), world.generation, "среда")
     cells[dead] = 0
     world.energy[dead] = 0
     world.trait[dead] = 1

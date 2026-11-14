@@ -11,9 +11,10 @@ from .world import CellularAutomaton, Ecosystem
 from .history import ExperimentHistory
 from .instruments import ResearchLog
 from .ecology import EcologySettings
+from .lineage import Pedigree
 
 
-FORMAT_VERSION = 4
+FORMAT_VERSION = 5
 
 
 def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
@@ -41,6 +42,8 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
         meta["ecology"] = world.ecology.as_dict()
         meta["mutations"] = world.mutations
         meta["rng_state"] = world._rng.bit_generator.state
+        meta["lineage"] = world.lineage.to_dict()
+        arrays["animal_ids"] = world.lineage.ids
     if history is not None:
         arrays["history"] = np.array(json.dumps(history.records, ensure_ascii=False))
     if research is not None:
@@ -53,7 +56,7 @@ def load_document(path: str | Path) -> tuple[CellularAutomaton | Ecosystem, Expe
     """Read the simulation and any recorded measurements from a .lifelab file."""
     with np.load(path, allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata"].item()))
-        if metadata.get("version") not in (1, 2, 3, FORMAT_VERSION):
+        if metadata.get("version") not in (1, 2, 3, 4, FORMAT_VERSION):
             raise ValueError("Неподдерживаемая версия сохранения")
         w, h = int(metadata["width"]), int(metadata["height"])
         CellularAutomaton._validate_dimensions(w, h)
@@ -89,10 +92,14 @@ def load_document(path: str | Path) -> tuple[CellularAutomaton | Ecosystem, Expe
             world.mutations = int(metadata.get("mutations", 0))
             if "rng_state" in metadata:
                 world._rng.bit_generator.state = metadata["rng_state"]
+            if metadata["version"] >= 5:
+                world.lineage = Pedigree.from_dict(archive["animal_ids"], metadata["lineage"], cells)
         else:
             raise ValueError("Неизвестный режим симуляции")
         world.cells[:] = cells
         world.generation = max(0, int(metadata.get("generation", 0)))
+        if isinstance(world, Ecosystem) and metadata["version"] < 5:
+            world.rebuild_lineage()
         world.total_births = max(0, int(metadata.get("total_births", 0)))
         world.total_deaths = max(0, int(metadata.get("total_deaths", 0)))
         if metadata["version"] >= 3 and "history" in archive:

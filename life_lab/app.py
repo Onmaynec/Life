@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import copy
 import math
 from pathlib import Path
 import time
@@ -103,8 +104,8 @@ class LifeLabApp:
         self.research_log.capture(self.world)
         self.chart_mode_var = tk.StringVar(value="Численность")
         self.trails = np.zeros_like(self.world.cells, dtype=np.uint8)
-        self.undo: list[tuple[np.ndarray, ...]] = []
-        self.redo: list[tuple[np.ndarray, ...]] = []
+        self.undo: list[tuple[Any, ...]] = []
+        self.redo: list[tuple[Any, ...]] = []
         self.current_image: ImageTk.PhotoImage | None = None
         self.fps_samples: deque[float] = deque(maxlen=25)
 
@@ -539,6 +540,7 @@ class LifeLabApp:
         self.root.bind_all("<Control-s>", lambda _e: self.save())
         self.root.bind_all("<Control-o>", lambda _e: self.load())
         self.root.bind("<Control-e>", self._key_experiment)
+        self.root.bind("<Control-l>", lambda _e: self.research_ui.show("Родословная"))
         shortcuts = {
             "<Control-z>": self.undo_action,
             "<Control-y>": self.redo_action,
@@ -669,6 +671,10 @@ class LifeLabApp:
                          f"  ·  Зрение: {self.world.sight[y,x]:.2f}"
                          f"\nПлодовитость: {self.world.fertility[y,x]:.2f}"
                          f"  ·  Возраст: {int(self.world.age[y,x])}")
+                individual = self.world.lineage.get(y, x)
+                if individual is not None:
+                    desc += (f"\nID: {individual.id}  ·  Линия: {individual.founder}"
+                             f"  ·  Колено: {individual.depth}")
         else:
             desc = f"{'Живая клетка' if kind else 'Пустая клетка'}  ·  {x}:{y}\nПравило {self.world.rule}"
         self.cell_inspector.config(text=desc, fg=TEXT)
@@ -733,17 +739,17 @@ class LifeLabApp:
         self.tool = "draw"
         self._update_tool_ui()
 
-    def _snapshot(self) -> tuple[np.ndarray, ...]:
+    def _snapshot(self) -> tuple[Any, ...]:
         if isinstance(self.world, Ecosystem):
             return tuple(a.copy() for a in (self.world.cells, self.world.energy,
                                              self.world.trait, self.world.sight,
                                              self.world.fertility, self.world.nutrients,
                                              self.world.moisture, self.world.age,
                                              self.world.seeds, self.world.organic,
-                                             self.world.toxins, self.world.altitude))
+                                             self.world.toxins, self.world.altitude)) + (copy.deepcopy(self.world.lineage),)
         return (self.world.cells.copy(),)
 
-    def _restore(self, snapshot: tuple[np.ndarray, ...]) -> None:
+    def _restore(self, snapshot: tuple[Any, ...]) -> None:
         if self.world.cells.shape != snapshot[0].shape:
             return
         if isinstance(self.world, Ecosystem):
@@ -752,8 +758,9 @@ class LifeLabApp:
                                   self.world.fertility, self.world.nutrients,
                                   self.world.moisture, self.world.age,
                                   self.world.seeds, self.world.organic,
-                                  self.world.toxins, self.world.altitude), snapshot):
+                                  self.world.toxins, self.world.altitude), snapshot[:12]):
                 arr[:] = data
+            self.world.lineage = copy.deepcopy(snapshot[12])
         else:
             self.world.cells[:] = snapshot[0]
         self._reset_visuals()
@@ -788,6 +795,7 @@ class LifeLabApp:
         self.research_log = ResearchLog()
         self.research_log.capture(self.world)
         self.research_ui.baseline = None
+        self.research_ui.selected_id = None
         self.research_ui.sync_ecology()
         self.research_ui.refresh(force=True)
         self._update_stats()
@@ -1151,6 +1159,10 @@ class LifeLabApp:
                 y0 += sy
 
     def _mouse_down(self, e: tk.Event[Any]) -> None:
+        if e.state & 0x4:  # Ctrl+click inspects an animal without painting.
+            x, y = self._screen_to_grid(e.x, e.y)
+            self.research_ui.select_animal(x, y)
+            return
         if e.state & 0x1:  # Shift + left drag = pan.
             self._pan_down(e)
             return
