@@ -26,6 +26,7 @@ from .experiment_ui import ExperimentStudio
 from .setup import WorldOptions, create_world
 from .visuals import PALETTES, STYLES, HEATMAP_FIELDS, colorize, draw_view, minimap, heatmap_view
 from .preferences import Preferences, load_preferences, save_preferences
+from .recovery import RecoveryStore
 from .plotting import draw_history_chart
 from .world import CellularAutomaton, Ecosystem, RULE_PRESETS
 
@@ -59,6 +60,9 @@ class LifeLabApp:
         preferences = load_preferences()
         self.skin_var = tk.StringVar(value=preferences.skin)
         self.animation_var = tk.BooleanVar(value=preferences.animation)
+        self.autosave_var = tk.BooleanVar(value=preferences.autosave)
+        self.recovery_store = RecoveryStore()
+        self._recovery_ready = False
         self.overlay_var = tk.BooleanVar(value=preferences.overlay)
         self.chart_fill_var = tk.BooleanVar(value=preferences.chart_fill)
         self._set_colors(preferences.skin)
@@ -128,11 +132,18 @@ class LifeLabApp:
         self._pulse_phase = 0
         self.root.after(220, self._pulse_status)
         self.root.after(35, self._tick)
+        self.root.after(350, self._offer_recovery)
+        self.root.after(180_000, self._autosave_tick)
 
     def run(self) -> None:
         self.root.mainloop()
 
     def _on_close(self) -> None:
+        if self._recovery_ready and self.autosave_var.get():
+            if not self._save_recovery_quiet() and not messagebox.askyesno(
+                "Life — ошибка сохранения",
+                "Последнюю сессию не удалось сохранить автоматически. Закрыть Life всё равно?"):
+                return
         try:
             save_preferences(Preferences(palette=self.palette_var.get(),
                                          style=self.cell_style_var.get(),
@@ -142,7 +153,8 @@ class LifeLabApp:
                                          skin=self.skin_var.get(),
                                          animation=self.animation_var.get(),
                                          overlay=self.overlay_var.get(),
-                                         chart_fill=self.chart_fill_var.get()))
+                                         chart_fill=self.chart_fill_var.get(),
+                                         autosave=self.autosave_var.get()))
         except OSError:
             pass  # Lack of write access must not prevent the application from closing.
         if self.suite_window and self.suite_window.window.winfo_exists():
@@ -414,6 +426,18 @@ class LifeLabApp:
         self.png_button = self._button(files, "ЭКСПОРТ PNG", self.export_png)
         self.png_button.pack(fill="x")
         self._button(files, "ИСТОРИЯ → CSV", self.export_csv).pack(fill="x", pady=(7, 0))
+        recovery_buttons = tk.Frame(files, bg=PANEL, pady=8)
+        recovery_buttons.pack(fill="x")
+        self._button(recovery_buttons, "СНИМОК F8", self.create_checkpoint).pack(
+            side="left", fill="x", expand=True, padx=(0, 4))
+        self._button(recovery_buttons, "ВЕРНУТЬ F9", self.restore_checkpoint).pack(
+            side="left", fill="x", expand=True)
+        tk.Checkbutton(files, text="Автосохранение каждые 3 минуты",
+                       variable=self.autosave_var, command=self._toggle_autosave,
+                       bg=PANEL, fg=TEXT,
+                       selectcolor=PANEL_2, activebackground=PANEL,
+                       activeforeground=TEXT, highlightthickness=0,
+                       anchor="w", font=(FONT, 9)).pack(fill="x")
 
         # Right: live data, navigator and appearance settings.
         right_shell, self.inspector_side, self.inspector_scroll = self._scroll_panel(workspace, 294)
@@ -580,6 +604,8 @@ class LifeLabApp:
         self.root.bind_all("<F11>",lambda _e:self.toggle_fullscreen())
         self.root.bind_all("<F6>",lambda _e:self.toggle_panel("left"))
         self.root.bind_all("<F7>",lambda _e:self.toggle_panel("right"))
+        self.root.bind("<F8>", lambda e: self._game_shortcut(e, self.create_checkpoint))
+        self.root.bind("<F9>", lambda e: self._game_shortcut(e, self.restore_checkpoint))
         self.root.bind_all("<Control-Tab>", lambda _e:self.next_research_tab())
         self.root.bind_all("<Control-Up>", lambda _e:self._adjust_speed(1))
         self.root.bind_all("<Control-Down>", lambda _e:self._adjust_speed(-1))
@@ -927,7 +953,8 @@ class LifeLabApp:
             ("Классика Конвея", "Каждая клетка либо жива, либо нет. Её судьба зависит от восьми соседей. Попробуйте поставить глайдер и запустить симуляцию."),
             ("Экосистема", "Растения используют питательные вещества, травоядные ищут растения, а хищники охотятся. У животных есть наследуемые признаки."),
             ("Управление", "Пробел — пауза, N — шаг. ЛКМ редактирует, ластик выбирается отдельно. ПКМ или СКМ — перемещение, колесо — масштаб, F — вписать мир."),
-            ("Наблюдение", "Справа: анализ, 3D, среда, каталог и родословные. Кнопки «Параметры» и «Исследование» скрывают панели. F10 — режим без боковых панелей, F11 — полный экран."),
+            ("Наблюдение", "Справа: анализ, 3D, среда, каталог и родословные. F10 — режим без боковых панелей, F11 — полный экран."),
+            ("Восстановление", "Автосохранение каждые 3 минуты (можно отключить). F8 создаёт контрольную точку, F9 возвращает к ней; на следующем запуске Life предложит открыть последнюю сессию."),
         ):
             self._label(frame, title, 11, GREEN, True).pack(anchor="w", pady=(0, 4))
             tk.Label(frame, text=desc, bg=PANEL, fg=TEXT, justify="left", anchor="w",
@@ -1483,33 +1510,105 @@ class LifeLabApp:
             except Exception as exc:
                 messagebox.showerror("Не удалось сохранить", str(exc))
 
+    def _install_world(self, world: CellularAutomaton | Ecosystem,
+                       history: ExperimentHistory, research: ResearchLog) -> None:
+        """Install only a fully decoded world, preserving the open session on failure."""
+        self.running = False
+        self._update_run_button()
+        self.world = world
+        self.wrap_var.set(world.wrap)
+        if isinstance(world, CellularAutomaton):
+            self.rule_entry_var.set(world.rule)
+        self.undo.clear()
+        self.redo.clear()
+        self.tool = "draw"
+        self.chart_mode_var.set("Численность")
+        self._update_mode_ui()
+        self._update_tool_ui()
+        self._reset_visuals(history)
+        self.research_log = research
+        if not self.research_log.records:
+            self.research_log.capture(world)
+        self.research_ui.sync_ecology()
+        self.research_ui.refresh(force=True)
+        self.fit_world()
+
     def load(self) -> None:
         path = filedialog.askopenfilename(title="Открыть мир", filetypes=[("Мир Life", "*.lifelab")])
         if path:
             try:
-                self.world, history = load_document(path)
-                saved_research = load_research(path)
-                self.running = False
-                self._update_run_button()
-                self.wrap_var.set(self.world.wrap)
-                if isinstance(self.world, CellularAutomaton):
-                    self.rule_entry_var.set(self.world.rule)
-                self.undo.clear()
-                self.redo.clear()
-                self.tool = "draw"
-                self.chart_mode_var.set("Численность")
-                self._update_mode_ui()
-                self._update_tool_ui()
-                self._reset_visuals(history)
-                self.research_log = saved_research
-                if not self.research_log.records:
-                    self.research_log.capture(self.world)
-                self.research_ui.sync_ecology()
-                self.research_ui.refresh(force=True)
-                self.fit_world()
+                # Decode both histories before touching the current world.
+                world, history = load_document(path)
+                research = load_research(path)
+                self._install_world(world, history, research)
                 self._show_hint(f"Загружено: {Path(path).name}")
             except Exception as exc:
                 messagebox.showerror("Не удалось открыть мир", str(exc))
+
+    def _save_recovery_quiet(self) -> bool:
+        try:
+            self.recovery_store.save(self.world, self.experiment, self.research_log)
+            return True
+        except Exception as exc:
+            self._show_hint(f"Автосохранение не выполнено: {exc}")
+            return False
+
+    def _toggle_autosave(self) -> None:
+        if not self.autosave_var.get():
+            try:
+                self.recovery_store.discard()
+            except OSError as exc:
+                messagebox.showwarning("Автосохранение", str(exc))
+        self._show_hint("Автосохранение включено" if self.autosave_var.get()
+                        else "Автосохранение отключено")
+
+    def _autosave_tick(self) -> None:
+        if self._recovery_ready and self.autosave_var.get():
+            self._save_recovery_quiet()
+        self.root.after(180_000, self._autosave_tick)
+
+    def _offer_recovery(self) -> None:
+        """Offer the previous session before writing a new automatic checkpoint."""
+        try:
+            if self.autosave_var.get() and self.recovery_store.available():
+                stamp = self.recovery_store.timestamp()
+                if messagebox.askyesno("Life — предыдущая сессия",
+                                       "Найдено автосохранение от " + stamp + ".\n"
+                                       "Восстановить последний мир и историю исследований?"):
+                    try:
+                        recovered = self.recovery_store.restore()
+                        self._install_world(*recovered)
+                        self._show_hint("Предыдущая сессия восстановлена")
+                    except Exception as exc:
+                        messagebox.showerror("Не удалось восстановить сессию", str(exc))
+                else:
+                    self.recovery_store.discard()
+        except OSError as exc:
+            self._show_hint(f"Нет доступа к автосохранению: {exc}")
+        finally:
+            self._recovery_ready = True
+
+    def create_checkpoint(self) -> None:
+        try:
+            self.recovery_store.save(self.world, self.experiment,
+                                     self.research_log, manual=True)
+            self._show_hint(f"Контрольная точка: поколение {self.world.generation}")
+        except Exception as exc:
+            messagebox.showerror("Не удалось создать точку", str(exc))
+
+    def restore_checkpoint(self) -> None:
+        if not self.recovery_store.available(manual=True):
+            messagebox.showinfo("Контрольная точка", "Сначала создайте точку кнопкой «Снимок» или F8.")
+            return
+        if not messagebox.askyesno("Вернуться к контрольной точке",
+                                  "Текущий мир будет заменён сохранённым снимком. Продолжить?"):
+            return
+        try:
+            recovered = self.recovery_store.restore(manual=True)
+            self._install_world(*recovered)
+            self._show_hint("Мир восстановлен из контрольной точки")
+        except Exception as exc:
+            messagebox.showerror("Не удалось восстановить точку", str(exc))
 
     def import_rle(self) -> None:
         if self.world.mode != "classic":

@@ -29,6 +29,7 @@ class Preferences:
     animation: bool = True
     overlay: bool = True
     chart_fill: bool = True
+    autosave: bool = True
 
     @classmethod
     def from_dict(cls, data: object) -> "Preferences":
@@ -48,6 +49,7 @@ class Preferences:
         animation = data.get("animation", True)
         overlay = data.get("overlay", True)
         chart_fill = data.get("chart_fill", True)
+        autosave = data.get("autosave", True)
         return cls(palette=palette if isinstance(palette, str) and palette in PALETTES else "Аврора",
                    style=style if isinstance(style, str) and style in STYLES else "Свечение",
                    grid=grid if type(grid) is bool else True,
@@ -56,13 +58,15 @@ class Preferences:
                    skin=selected_skin if isinstance(selected_skin, str) and selected_skin in SKINS else "Графит / циан",
                    animation=animation if type(animation) is bool else True,
                    overlay=overlay if type(overlay) is bool else True,
-                   chart_fill=chart_fill if type(chart_fill) is bool else True)
+                   chart_fill=chart_fill if type(chart_fill) is bool else True,
+                   autosave=autosave if type(autosave) is bool else True)
 
     def as_dict(self) -> dict[str, str | int | bool]:
         return {"palette": self.palette, "style": self.style, "grid": self.grid,
                 "trails": self.trails, "speed": self.speed,
                 "skin": self.skin, "animation": self.animation,
-                "overlay": self.overlay, "chart_fill": self.chart_fill}
+                "overlay": self.overlay, "chart_fill": self.chart_fill,
+                "autosave": self.autosave}
 
 
 def load_preferences(path: Path | None = None) -> Preferences:

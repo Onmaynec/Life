@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +50,22 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
         arrays["history"] = np.array(json.dumps(history.records, ensure_ascii=False))
     if research is not None:
         arrays["research"] = np.array(json.dumps(research.records, ensure_ascii=False))
-    with open(path, "wb") as f:
-        np.savez_compressed(f, metadata=np.array(json.dumps(meta)), **arrays)
+    # Write a complete archive beside the destination before replacing it.
+    # A failed write must never truncate an earlier valid world.
+    target = Path(path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=target.parent,
+                                         prefix=f".{target.name}.", suffix=".tmp",
+                                         delete=False) as stream:
+            temporary = Path(stream.name)
+            np.savez_compressed(stream, metadata=np.array(json.dumps(meta)), **arrays)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_document(path: str | Path) -> tuple[CellularAutomaton | Ecosystem, ExperimentHistory]:

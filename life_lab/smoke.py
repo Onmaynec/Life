@@ -14,7 +14,9 @@ from PIL import Image
 from .patterns import encode_rle, decode_rle
 from .preferences import Preferences, load_preferences, save_preferences
 from .instruments import ResearchLog
+from .history import ExperimentHistory
 from .storage import load_world, save_world
+from .recovery import RecoveryStore
 from .world import CellularAutomaton, Ecosystem
 
 
@@ -29,6 +31,11 @@ def run_smoke() -> None:
         assert np.array_equal(loaded.cells, world.cells)
         assert loaded.generation == world.generation
         assert np.array_equal(loaded.lineage.ids,world.lineage.ids)
+        recovery = RecoveryStore(root / "recovery")
+        recovery.save(world, ExperimentHistory.start(world), ResearchLog(), manual=True)
+        restored, _, _ = recovery.restore(manual=True)
+        assert np.array_equal(restored.cells, world.cells)
+        assert np.array_equal(restored.lineage.ids, world.lineage.ids)
         classic = CellularAutomaton(30, 20)
         classic.paint(4,4)
         text = encode_rle(classic.cells)
