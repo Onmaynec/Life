@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import tempfile
 import time
+from types import SimpleNamespace
 
 from .history import ExperimentHistory
 from .instruments import ResearchLog
@@ -34,7 +35,19 @@ def run_ui_smoke(out: str | Path | None = None) -> dict[str, object]:
             world.randomize(seed=31)
             log = ResearchLog()
             log.capture(world)
+            world.ecology.enabled = True
             app._install_world(world, ExperimentHistory.start(world), log)
+            app.root.update()
+            app._render()
+            app.dirty = False
+            app._mouse_motion(SimpleNamespace(
+                x=int(app.cam_x + 4 * app.zoom + app.zoom / 2),
+                y=int(app.cam_y + 4 * app.zoom + app.zoom / 2)))
+            if app.dirty:
+                raise AssertionError("Движение курсора вызвало полную перерисовку мира")
+            if not app.canvas.find_withtag("pointer-overlay"):
+                raise AssertionError("Не отображается отдельный слой указателя")
+            app._mouse_leave(None)
             app.open_scenario_studio()
             studio = app.scenario_window
             if studio is None:
@@ -65,6 +78,7 @@ def run_ui_smoke(out: str | Path | None = None) -> dict[str, object]:
                 "dpi": round(float(app.screen_dpi), 2),
                 "title": app.root.title(), "scenarios_steps": studio.session.completed,
                 "scenario_source_generation": app.world.generation,
+                "pointer_overlay_cached": True,
                 "pass": True,
             }
             if out:

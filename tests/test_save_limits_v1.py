@@ -62,6 +62,29 @@ class ArchiveSafetyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_document(self.path)
 
+    def _rewrite_ecosystem_array(self, key, replacement):
+        save_world(Ecosystem(20, 20, seed=3), self.path)
+        with np.load(self.path, allow_pickle=False) as archive:
+            metadata = archive["metadata"].copy()
+            arrays = {name: archive[name].copy() for name in archive.files if name != "metadata"}
+        arrays[key] = replacement
+        with self.path.open("wb") as stream:
+            np.savez_compressed(stream, metadata=metadata, **arrays)
+
+    def test_rejects_numeric_layers_outside_model_ranges(self):
+        shape = (20, 20)
+        cases = (
+            ("nutrients", np.full(shape, -1.0, dtype=np.float64)),
+            ("altitude", np.full(shape, 1.5, dtype=np.float64)),
+            ("energy", np.full(shape, 1e100, dtype=np.float64)),
+            ("age", np.full(shape, 1.5, dtype=np.float64)),
+        )
+        for key, value in cases:
+            with self.subTest(key=key):
+                self._rewrite_ecosystem_array(key, value)
+                with self.assertRaises(ValueError):
+                    load_document(self.path)
+
 
 if __name__ == "__main__":
     unittest.main()

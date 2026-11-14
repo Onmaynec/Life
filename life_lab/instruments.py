@@ -15,7 +15,7 @@ from .world import Ecosystem, neighbour_counts
 MEASURES = (
     "generation", "population", "occupancy", "plants", "herbivores", "predators",
     "births", "deaths", "net_growth", "diversity", "entropy", "mean_neighbours",
-    "lonely", "crowded", "clusters", "largest_cluster", "edge_contacts",
+    "lonely", "crowded", "clusters", "largest_cluster", "cluster_generation", "edge_contacts",
     "centroid_x", "centroid_y", "dispersion", "soil", "moisture", "energy",
     "herbivore_energy", "predator_energy", "mean_age", "max_age",
     "mean_metabolism", "mean_sight", "mean_fertility", "sunlight", "temperature",
@@ -25,8 +25,8 @@ MEASURES = (
 )
 
 
-def _clusters(mask: np.ndarray) -> tuple[int, int]:
-    """4-connected component count and largest component, bounded local traversal."""
+def _clusters(mask: np.ndarray, wrap: bool = False) -> tuple[int, int]:
+    """4-connected components using the same edge topology as the simulation."""
     h, w = mask.shape
     points = np.argwhere(mask)
     seen = np.zeros(mask.shape, dtype=bool)
@@ -43,6 +43,8 @@ def _clusters(mask: np.ndarray) -> tuple[int, int]:
             cy, cx = pending.pop()
             group += 1
             for ny, nx in ((cy-1,cx),(cy+1,cx),(cy,cx-1),(cy,cx+1)):
+                if wrap:
+                    ny, nx = ny % h, nx % w
                 if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny,nx]:
                     seen[ny,nx] = True
                     pending.append((ny,nx))
@@ -65,7 +67,7 @@ def measure(world: Any, events: dict[str, Any] | None = None,
     yx = np.argwhere(mask)
     cy, cx = (float(yx[:,0].mean()),float(yx[:,1].mean())) if pop else (0.0,0.0)
     spread = float(np.sqrt(np.mean((yx[:,0]-cy)**2 + (yx[:,1]-cx)**2))) if pop else 0.0
-    components, largest = _clusters(mask) if include_clusters else (None, None)
+    components, largest = _clusters(mask, world.wrap) if include_clusters else (None, None)
     e = events or {}
     rec: dict[str,float | int | None] = {
         "generation": world.generation, "population": pop,
@@ -79,6 +81,7 @@ def measure(world: Any, events: dict[str, Any] | None = None,
         "lonely": int(np.count_nonzero(mask & (neighbours < 2))),
         "crowded": int(np.count_nonzero(mask & (neighbours > 3))),
         "clusters": components, "largest_cluster": largest,
+        "cluster_generation": world.generation if include_clusters else None,
         "edge_contacts": int(mask[0,:].sum()+mask[-1,:].sum()+mask[:,0].sum()+mask[:,-1].sum()),
         "centroid_x": cx, "centroid_y": cy, "dispersion": spread,
         "soil": None, "moisture": None, "energy": None,
@@ -198,10 +201,7 @@ class ResearchLog:
 
     def capture(self, world: Any, events: dict[str,Any] | None = None) -> None:
         deep = world.generation % 5 == 0 or not self.records
-        data=measure(world,events,include_clusters=deep)
-        if not deep and self.records:
-            data["clusters"] = self.records[-1].get("clusters")
-            data["largest_cluster"] = self.records[-1].get("largest_cluster")
+        data = measure(world, events, include_clusters=deep)
         if self.records and self.records[-1]["generation"] == data["generation"]:
             self.records[-1]=data
         else:
@@ -219,20 +219,34 @@ class ResearchLog:
     def from_records(cls, data: Any) -> "ResearchLog":
         if not isinstance(data,list) or len(data)>2000:
             raise ValueError("Повреждённый исследовательский журнал")
-        prev=-1
+        prev = -1
+        normalized: list[dict[str, float | int | None]] = []
+        legacy_cluster_schema = bool(data) and isinstance(data[0], dict) and "cluster_generation" not in data[0]
         for entry in data:
             if not isinstance(entry,dict):
                 raise ValueError("Неизвестные показатели исследования")
-            old_keys = {"families", "lineage_depth", "mean_lineage_depth", "pedigree_records"}
+            entry = dict(entry)
+            old_keys = {"families", "lineage_depth", "mean_lineage_depth",
+                        "pedigree_records", "cluster_generation"}
             if not set(entry).issubset(MEASURES) or (set(MEASURES)-set(entry)) - old_keys:
                 raise ValueError("Неизвестные показатели исследования")
             for key in old_keys:
                 entry.setdefault(key, None)
-            g=entry.get("generation")
+            g = entry.get("generation")
             if type(g) is not int or g <= prev:
                 raise ValueError("Неверные поколения")
-            prev=g
+            # v1.0.0 copied previous cluster values into unsampled generations.
+            if legacy_cluster_schema:
+                entry["cluster_generation"] = g if g % 5 == 0 else None
+            if entry["cluster_generation"] is not None:
+                if type(entry["cluster_generation"]) is not int or entry["cluster_generation"] > g:
+                    raise ValueError("Неверное поколение измерения кластеров")
+            else:
+                entry["clusters"] = None
+                entry["largest_cluster"] = None
+            prev = g
             for value in entry.values():
-                if value is not None and (type(value) not in (int,float) or not math.isfinite(value)):
+                if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
                     raise ValueError("Неверные измерения")
-        return cls(data)
+            normalized.append(entry)
+        return cls(normalized)

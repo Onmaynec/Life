@@ -48,14 +48,16 @@ class ImportedStudy:
                 return False, f"Различается {key}"
         return True, "Сопоставимые исходные условия (seed и диапазон могут различаться)"
 
-    def curve(self, metric: str) -> list[tuple[int, float]]:
-        """Mean over valid observations per step; never fabricate missing steps."""
+    def curve(self, metric: str, variant: int = 1) -> list[tuple[int, float]]:
+        """Mean over repetitions of one variant; never mix different parameter values."""
         if metric not in _METRICS:
             raise ValueError("Неизвестная метрика")
+        if type(variant) is not int or not 1 <= variant <= self.plan.variants:
+            raise ValueError("Номер варианта выходит за пределы серии")
         grouped: dict[int, list[float]] = {}
         for row in self.series:
             value = row[metric]
-            if _numeric(value):
+            if row["variant"] == variant and _numeric(value):
                 grouped.setdefault(row["step"], []).append(float(value))
         return [(step, sum(v) / len(v)) for step, v in sorted(grouped.items())]
 

@@ -42,7 +42,8 @@ class Intervention:
     kind: str
     value: float
 
-    def validate(self, steps: int, *, ecology_enabled: bool) -> None:
+    def validate(self, steps: int, *, ecology_enabled: bool,
+                 toxins_enabled: bool = False) -> None:
         if type(self.at) is not int or not 0 <= self.at < steps:
             raise ValueError("Поколение вмешательства выходит за пределы опыта")
         if self.kind not in INTERVENTION_KINDS:
@@ -51,6 +52,13 @@ class Intervention:
             raise ValueError("Значение воздействия должно быть конечным числом")
         if self.kind in CLIMATE_KEYS and not ecology_enabled:
             raise ValueError("Для климатического воздействия включите модель среды")
+        if self.kind == "moisture" and not ecology_enabled:
+            raise ValueError("Изменение влажности требует включённой модели среды")
+        if self.kind == "toxins":
+            if not ecology_enabled:
+                raise ValueError("Загрязнение требует включённой модели среды")
+            if not toxins_enabled:
+                raise ValueError("Для воздействия токсинами включите механизм «Токсины» в настройках среды")
         if self.kind in CLIMATE_KEYS and not 0 <= self.value <= 1:
             raise ValueError("Для параметра среды нужен диапазон от 0 до 1")
         if self.kind in ("disease", "wildfire") and self.value not in (0, 1):
@@ -80,7 +88,8 @@ class ScenarioPlan:
         for event in self.interventions:
             if not isinstance(event, Intervention):
                 raise ValueError("Неверный тип воздействия")
-            event.validate(self.steps, ecology_enabled=world.ecology.enabled)
+            event.validate(self.steps, ecology_enabled=world.ecology.enabled,
+                           toxins_enabled=world.ecology.toxins)
 
 
 PRESETS: dict[str, tuple[Intervention, ...]] = {
@@ -183,22 +192,27 @@ class ScenarioSession:
             pass
         return self
 
+    def export_samples(self) -> list[dict[str, int | float | str | None]]:
+        """Return scheduled measurements plus the exact current state when paused."""
+        rows = list(self.samples)
+        if not rows or int(rows[-1]["step"]) != self.completed:
+            rows.extend((_observe(self.reference, self.completed, "control"),
+                         _observe(self.treatment, self.completed, "scenario")))
+        return rows
+
     def curves(self, metric: str) -> dict[str, list[tuple[int, float]]]:
         if metric not in METRICS.values():
             raise ValueError("Неизвестный показатель")
         series: dict[str, list[tuple[int, float]]] = {"control": [], "scenario": []}
-        for row in self.samples:
+        for row in self.export_samples():
             value = row[metric]
             if value is not None:
                 series[str(row["branch"])].append((int(row["step"]), float(value)))
         return series
 
     def summary(self) -> dict[str, Any]:
-        final = {str(row["branch"]): row for row in self.samples[-2:]}
-        if len(final) != 2:
-            raise ValueError("В опыте отсутствует контрольная группа")
-        control = final["control"]
-        treatment = final["scenario"]
+        control = _observe(self.reference, self.completed, "control")
+        treatment = _observe(self.treatment, self.completed, "scenario")
         return {
             "completed": self.completed,
             "control_population": control["population"],
@@ -211,9 +225,10 @@ class ScenarioSession:
 
     def export_csv(self, path: str | Path) -> None:
         with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=list(self.samples[0]))
+            rows = self.export_samples()
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
-            writer.writerows(self.samples)
+            writer.writerows(rows)
 
     def export_json(self, path: str | Path) -> None:
         document = {
@@ -222,7 +237,7 @@ class ScenarioSession:
             "plan": {"steps": self.plan.steps, "sample_every": self.plan.sample_every,
                      "interventions": [asdict(e) for e in self.plan.interventions]},
             "completed": self.completed, "applied_events": [asdict(e) for e in self.fired],
-            "summary": self.summary(), "samples": self.samples,
+            "summary": self.summary(), "samples": self.export_samples(),
         }
         Path(path).write_text(json.dumps(document, ensure_ascii=False, indent=2,
                                         allow_nan=False) + "\n", encoding="utf-8")

@@ -28,8 +28,9 @@ from .setup import WorldOptions, create_world
 from .visuals import PALETTES, STYLES, HEATMAP_FIELDS, colorize, draw_view, minimap, heatmap_view
 from .preferences import Preferences, load_preferences, save_preferences
 from .recovery import RecoveryStore
+from .editor_history import EditorHistory
 from .plotting import draw_history_chart
-from .world import CellularAutomaton, Ecosystem, RULE_PRESETS
+from .world import CellularAutomaton, Ecosystem, RULE_PRESETS, parse_rule
 
 
 BG = "#0B0D10"
@@ -121,8 +122,7 @@ class LifeLabApp:
         self.research_log.capture(self.world)
         self.chart_mode_var = tk.StringVar(value="Численность")
         self.trails = np.zeros_like(self.world.cells, dtype=np.uint8)
-        self.undo: list[tuple[Any, ...]] = []
-        self.redo: list[tuple[Any, ...]] = []
+        self.editor_history = EditorHistory(limit=25)
         self.current_image: ImageTk.PhotoImage | None = None
         self.fps_samples: deque[float] = deque(maxlen=25)
 
@@ -894,52 +894,28 @@ class LifeLabApp:
         self.tool = "draw"
         self._update_tool_ui()
 
-    def _snapshot(self) -> tuple[Any, ...]:
-        if isinstance(self.world, Ecosystem):
-            return tuple(a.copy() for a in (self.world.cells, self.world.energy,
-                                             self.world.trait, self.world.sight,
-                                             self.world.fertility, self.world.nutrients,
-                                             self.world.moisture, self.world.age,
-                                             self.world.seeds, self.world.organic,
-                                             self.world.toxins, self.world.altitude)) + (copy.deepcopy(self.world.lineage),)
-        return (self.world.cells.copy(),)
-
-    def _restore(self, snapshot: tuple[Any, ...]) -> None:
-        if self.world.cells.shape != snapshot[0].shape:
-            return
-        if isinstance(self.world, Ecosystem):
-            for arr, data in zip((self.world.cells, self.world.energy,
-                                  self.world.trait, self.world.sight,
-                                  self.world.fertility, self.world.nutrients,
-                                  self.world.moisture, self.world.age,
-                                  self.world.seeds, self.world.organic,
-                                  self.world.toxins, self.world.altitude), snapshot[:12]):
-                arr[:] = data
-            self.world.lineage = copy.deepcopy(snapshot[12])
-        else:
-            self.world.cells[:] = snapshot[0]
-        self._reset_visuals()
-
     def _push_undo(self) -> None:
-        self.undo.append(self._snapshot())
-        if len(self.undo) > 25:
-            del self.undo[0]
-        self.redo.clear()
+        self.editor_history.push(self.world)
+
+    def _sync_editor_rule(self) -> None:
+        if isinstance(self.world, CellularAutomaton):
+            self.rule_entry_var.set(self.world.rule)
+            self.world_mode_label.config(text=f"КОНВЕЙ · {self.world.rule}")
 
     def undo_action(self) -> None:
         self.running = False
         self._update_run_button()
-        if self.undo:
-            self.redo.append(self._snapshot())
-            self._restore(self.undo.pop())
+        if self.editor_history.undo(self.world):
+            self._sync_editor_rule()
+            self._reset_visuals()
             self._show_hint("Последнее редактирование отменено")
 
     def redo_action(self) -> None:
         self.running = False
         self._update_run_button()
-        if self.redo:
-            self.undo.append(self._snapshot())
-            self._restore(self.redo.pop())
+        if self.editor_history.redo(self.world):
+            self._sync_editor_rule()
+            self._reset_visuals()
             self._show_hint("Редактирование повторено")
 
     def _reset_visuals(self, history: ExperimentHistory | None = None) -> None:
@@ -1098,8 +1074,8 @@ class LifeLabApp:
                                  else options.plants + options.herbivores + options.predators)
             if isinstance(new_world, CellularAutomaton):
                 self.rule_entry_var.set(new_world.rule)
-            self.undo.clear()
-            self.redo.clear()
+            self.editor_history.clear()
+            
             self.tool = "draw"
             self.chart_mode_var.set("Численность")
             self._update_mode_ui()
@@ -1131,8 +1107,8 @@ class LifeLabApp:
         self.world.randomize(self.density_var.get())
         if isinstance(self.world, Ecosystem):
             self.world.ecology.enabled = True
-        self.undo.clear()
-        self.redo.clear()
+        self.editor_history.clear()
+        
         self.tool = "draw"
         self.chart_mode_var.set("Численность")
         self._update_mode_ui()
@@ -1399,16 +1375,18 @@ class LifeLabApp:
 
     def _mouse_motion(self, e: tk.Event[Any]) -> None:
         xy = self._screen_to_grid(e.x, e.y)
+        if xy == self.pointer:
+            return
         self.pointer = xy
         self._update_cell_inspector(xy)
         self.coord_label.config(text=f"X: {xy[0]}    Y: {xy[1]}    ·    ×{self.zoom}")
-        self._mark_dirty()
+        self._render_pointer_overlay()
 
     def _mouse_leave(self, _: tk.Event[Any]) -> None:
         self.pointer = None
         self._update_cell_inspector(None)
         self.coord_label.config(text="X: —    Y: —")
-        self._mark_dirty()
+        self.canvas.delete("pointer-overlay")
 
     def _wheel(self, e: tk.Event[Any]) -> None:
         self._zoom_at(e.x, e.y, 1 if e.delta > 0 else -1)
@@ -1465,21 +1443,31 @@ class LifeLabApp:
                                 outline=PALETTES[self.palette_var.get()].border, width=1)
         if self.overlay_var.get() and self.zoom>=4:
             self._draw_coordinate_rulers(canvas,x0,y0,x1,y1,vw,vh)
-        if self.pointer:
-            x, y = self.pointer
-            if 0 <= x < self.world.width and 0 <= y < self.world.height:
-                sx, sy = self.cam_x+x*self.zoom, self.cam_y+y*self.zoom
-                if self.tool == "stamp" and self.world.mode == "classic":
-                    pat = self.research_ui.stamp_array(self.pattern_name.get())
-                    for yy, xx in np.argwhere(pat):
-                        qx, qy = sx + int(xx)*self.zoom, sy + int(yy)*self.zoom
-                        canvas.create_rectangle(qx, qy, qx+self.zoom, qy+self.zoom,
-                                                outline=GREEN, width=2)
-                else:
-                    canvas.create_rectangle(sx, sy, sx+self.zoom, sy+self.zoom,
-                                            outline=PINK if self.tool == "erase" else GREEN, width=2)
+        self._render_pointer_overlay()
         self.zoom_label.config(text=f"{self.zoom} px / кл.")
         self._draw_minimap()
+
+    def _render_pointer_overlay(self) -> None:
+        """Redraw only the cursor preview; the world bitmap remains untouched."""
+        canvas = self.canvas
+        canvas.delete("pointer-overlay")
+        if self.pointer is None:
+            return
+        x, y = self.pointer
+        if not (0 <= x < self.world.width and 0 <= y < self.world.height):
+            return
+        sx, sy = self.cam_x + x * self.zoom, self.cam_y + y * self.zoom
+        if self.tool == "stamp" and self.world.mode == "classic":
+            pattern = self.research_ui.stamp_array(self.pattern_name.get())
+            for yy, xx in np.argwhere(pattern):
+                qx, qy = sx + int(xx) * self.zoom, sy + int(yy) * self.zoom
+                canvas.create_rectangle(qx, qy, qx + self.zoom, qy + self.zoom,
+                                        outline=GREEN, width=2, tags=("pointer-overlay",))
+        else:
+            canvas.create_rectangle(
+                sx, sy, sx + self.zoom, sy + self.zoom,
+                outline=PINK if self.tool == "erase" else GREEN,
+                width=2, tags=("pointer-overlay",))
 
     def _draw_coordinate_rulers(self, canvas: tk.Canvas, x0: int, y0: int,
                                 x1: int, y1: int, width: int, height: int) -> None:
@@ -1543,8 +1531,8 @@ class LifeLabApp:
         self.wrap_var.set(world.wrap)
         if isinstance(world, CellularAutomaton):
             self.rule_entry_var.set(world.rule)
-        self.undo.clear()
-        self.redo.clear()
+        self.editor_history.clear()
+        
         self.tool = "draw"
         self.chart_mode_var.set("Численность")
         self._update_mode_ui()
@@ -1642,6 +1630,8 @@ class LifeLabApp:
             return
         try:
             arr, rule = decode_rle(Path(path).read_text(encoding="utf-8-sig"))
+            if rule is not None:
+                parse_rule(rule)
             self._push_undo()
             place_pattern(self.world.cells, arr,
                           (self.world.width - arr.shape[1]) // 2,

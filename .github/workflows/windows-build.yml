@@ -70,5 +70,21 @@ jobs:
             Start-Sleep -Seconds 10
           }
           if (-not $ready) { throw "GitHub Release $tag not found after waiting" }
-          gh release upload $tag $asset --clobber
+
+          $tagSha = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha // empty'
+          if ($LASTEXITCODE -ne 0 -or -not $tagSha) {
+            throw "Could not resolve immutable release tag $tag"
+          }
+          if ($tagSha -ne $env:GITHUB_SHA) {
+            Write-Host "Skipping upload: build commit $env:GITHUB_SHA does not match release commit $tagSha"
+            exit 0
+          }
+
+          $assetNames = gh release view $tag --json assets --jq '.assets[].name'
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect assets for $tag" }
+          if ($assetNames -contains $asset) {
+            Write-Host "Windows asset $asset already exists; published release files are immutable."
+            exit 0
+          }
+          gh release upload $tag $asset
           if ($LASTEXITCODE -ne 0) { throw "Could not upload Windows archive to $tag" }

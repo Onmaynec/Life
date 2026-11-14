@@ -68,6 +68,15 @@ def neighbour_counts(mask: np.ndarray, wrap: bool = False) -> np.ndarray:
     return total
 
 
+def _grid_distance_squared(a: tuple[int, int], b: tuple[int, int],
+                           width: int, height: int, wrap: bool = False) -> int:
+    """Squared Euclidean distance with the world's boundary topology."""
+    dx, dy = abs(a[0] - b[0]), abs(a[1] - b[1])
+    if wrap:
+        dx, dy = min(dx, width - dx), min(dy, height - dy)
+    return dx * dx + dy * dy
+
+
 class CellularAutomaton:
     mode = "classic"
 
@@ -286,6 +295,10 @@ class Ecosystem:
         self.nutrients[plant] -= 2.2
         starving = plant & (self.nutrients < 4.0)
         death_count = int(np.count_nonzero(starving))
+        if self.ecology.enabled and self.ecology.seed_bank:
+            self.seeds[starving] = np.minimum(
+                255, self.seeds[starving].astype(np.uint16) + 2).astype(np.uint8)
+        self.age[starving] = 0
         cells[starving] = 0
         deaths += death_count
         # Plants reproduce only on suitable, adjacent soil.
@@ -297,6 +310,7 @@ class Ecosystem:
         sprout = (fertile & (rng.random(cells.shape) < 0.17)) | (available & (self.nutrients > 55) & (rng.random(cells.shape) < 0.00018))
         births += int(np.count_nonzero(sprout))
         cells[sprout] = 1
+        self.age[sprout] = 0
         self.nutrients[sprout] -= 7.0
 
         # Predators move first; herbivores then take their turns. Animal
@@ -344,7 +358,11 @@ class Ecosystem:
                     food=[(nx,ny) for nx,ny in food if sum(cells[py,px]==2 for px,py in self._neighbours(nx,ny))<4]
                 if self.ecology.enabled and self.ecology.herbivore_flee and kind==2 and empty and any(cells[ny,nx]==3 for nx,ny in nearby):
                     danger=[(nx,ny) for nx,ny in nearby if cells[ny,nx]==3]
-                    destination=max(empty,key=lambda dest: min((dest[0]-px)**2+(dest[1]-py)**2 for px,py in danger))
+                    destination=max(
+                        empty,
+                        key=lambda dest: min(
+                            _grid_distance_squared(dest, (px, py), self.width, self.height, self.wrap)
+                            for px, py in danger))
                 elif food:
                     destination = food[0]
                     deaths += 1  # Prey eaten; never counted as surviving.

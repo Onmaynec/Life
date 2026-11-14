@@ -20,6 +20,7 @@ class ScenarioTests(unittest.TestCase):
         self.world = Ecosystem(25, 21, seed=7)
         self.world.randomize(seed=103)
         self.world.ecology.enabled = True
+        self.world.ecology.toxins = True
 
     @staticmethod
     def plan(events=(Intervention(0,"moisture",-20),), *, steps=12, sample=4):
@@ -134,7 +135,12 @@ class ScenarioTests(unittest.TestCase):
             doc=json.loads(json_path.read_text(encoding="utf-8"))
             self.assertEqual(doc["format"],"life-scenario-1")
             self.assertEqual(doc["completed"],1)
-            self.assertEqual(len(doc["samples"]),2)
+            self.assertEqual(len(doc["samples"]),4)
+            self.assertEqual([row["step"] for row in doc["samples"]], [0, 0, 1, 1])
+            self.assertEqual(doc["summary"]["control_population"],
+                             int(np.count_nonzero(s.reference.cells)))
+            self.assertEqual(doc["summary"]["scenario_population"],
+                             int(np.count_nonzero(s.treatment.cells)))
             self.assertEqual(len(doc["applied_events"]),1)
 
     def test_all_metrics_available(self):
@@ -170,11 +176,16 @@ class ScenarioTests(unittest.TestCase):
         with self.assertRaises(ValueError):ScenarioSession(self.world,self.plan([Intervention(0,"banana",1)]))
         self.assertEqual(len(INTERVENTION_KINDS),8)
 
-    def test_ecology_required_for_climate_events(self):
+    def test_ecology_required_for_climate_and_moisture_events(self):
         self.world.ecology.enabled=False
-        for kind in ("rain","heat","disease","wildfire","water_flow"):
+        for kind in ("rain","heat","disease","wildfire","water_flow","moisture"):
             with self.subTest(kind=kind),self.assertRaises(ValueError):
                 ScenarioSession(self.world,self.plan([Intervention(0,kind,1)]))
+
+    def test_toxin_intervention_requires_toxin_mechanic(self):
+        self.world.ecology.toxins = False
+        with self.assertRaisesRegex(ValueError, "Токсины"):
+            ScenarioSession(self.world, self.plan([Intervention(0, "toxins", 20)]))
 
     def test_climate_switches_and_setters(self):
         s=ScenarioSession(self.world,self.plan([

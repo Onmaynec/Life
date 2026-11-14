@@ -110,6 +110,10 @@ def decode_rle(data: str) -> tuple[np.ndarray, str | None]:
         raise ValueError("Размер RLE ограничен 700×500")
     mr = re.search(r"\brule\s*=\s*([^,\s]+)", header, flags=re.I)
     rule = mr.group(1).upper() if mr else None
+    if rule is not None:
+        from .world import parse_rule
+        birth, survival = parse_rule(rule)
+        rule = f"B{''.join(map(str, birth))}/S{''.join(map(str, survival))}"
     body = "".join(lines[1:]).replace(" ", "")
     arr = np.zeros((h, w), dtype=np.uint8)
     x = y = 0
