@@ -19,10 +19,11 @@ from .storage import load_document, load_research, save_world
 from .history import ExperimentHistory
 from .instruments import ResearchLog
 from .chrome import dark_titlebar
-from .layout import window_dimensions, permitted_panels, dialog_dimensions
+from .layout import window_dimensions, permitted_panels, dialog_dimensions, logical_width
 from .skins import SKINS, skin
 from .research_ui import ResearchWorkspace
 from .experiment_ui import ExperimentStudio
+from .scenario_ui import ScenarioWorkbench
 from .setup import WorldOptions, create_world
 from .visuals import PALETTES, STYLES, HEATMAP_FIELDS, colorize, draw_view, minimap, heatmap_view
 from .preferences import Preferences, load_preferences, save_preferences
@@ -69,15 +70,18 @@ class LifeLabApp:
         self.root.title(f"Life  —  v{__version__}")
         screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         window_w, window_h = window_dimensions(screen_w, screen_h)
+        # DPI-aware breakpoints: on scaled Windows displays text uses more pixels.
+        self.screen_dpi = max(96.0, float(self.root.winfo_fpixels("1i")))
         self.root.geometry(f"{window_w}x{window_h}")
         self.root.minsize(780, 490)
-        self.left_visible = permitted_panels(window_w) >= 1
-        self.right_visible = permitted_panels(window_w) >= 2
+        self.left_visible = permitted_panels(window_w, self.screen_dpi) >= 1
+        self.right_visible = permitted_panels(window_w, self.screen_dpi) >= 2
         self._last_layout_width = window_w
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(80, lambda: dark_titlebar(self.root, BG))
         self.suite_window: ExperimentStudio | None = None
+        self.scenario_window: ScenarioWorkbench | None = None
 
         self.world: CellularAutomaton | Ecosystem = CellularAutomaton()
         self.world.randomize(0.22, seed=42)
@@ -159,6 +163,8 @@ class LifeLabApp:
             pass  # Lack of write access must not prevent the application from closing.
         if self.suite_window and self.suite_window.window.winfo_exists():
             self.suite_window.close()
+        if self.scenario_window and self.scenario_window.window.winfo_exists():
+            self.scenario_window.close()
         self.root.destroy()
 
     def _set_colors(self, name: str) -> None:
@@ -171,6 +177,9 @@ class LifeLabApp:
 
     def change_skin(self, _event: Any = None) -> None:
         """Recreate Tk surfaces so every control picks up the same neutral theme."""
+        if self.scenario_window and self.scenario_window.window.winfo_exists():
+            self.scenario_window.close()
+        self.scenario_window = None
         self._set_colors(self.skin_var.get())
         self.root.configure(bg=BG)
         for widget in self.root.winfo_children():
@@ -307,7 +316,9 @@ class LifeLabApp:
         self.live_indicator.pack(side="right",padx=(10,0))
         self._button(actions, "?", self.show_help, width=3).pack(side="left", padx=(0, 7))
         self._button(actions, "+  НОВЫЙ МИР", self.new_world_dialog).pack(side="left", padx=(0, 8))
-        self._button(actions, "СОХРАНИТЬ", self.save).pack(side="left", padx=(0, 16))
+        self._button(actions, "СОХРАНИТЬ", self.save).pack(side="left", padx=(0, 8))
+        self.scenario_button = self._button(actions, "СЦЕНАРИИ", self.open_scenario_studio)
+        self.scenario_button.pack(side="left", padx=(0, 8))
         speed_caption=self._label(actions, "ШАГОВ / СЕК", 9, MUTED, True)
         speed_caption.pack(side="left", padx=(0, 7))
         minus_speed=self._button(actions, "−", lambda: self._adjust_speed(-1), width=3)
@@ -319,7 +330,7 @@ class LifeLabApp:
         plus_speed.pack(side="left", padx=(0, 16))
         step_button=self._button(actions, "ОДИН ШАГ", self.step_once)
         step_button.pack(side="left", padx=(0, 8))
-        self._compact_action_widgets=(speed_caption,minus_speed,speed_value,plus_speed,step_button)
+        self._compact_action_widgets=(speed_caption,minus_speed,speed_value,plus_speed,step_button, self.scenario_button)
         self._actions_compact=False
         self.run_button = self._button(actions, "▶  ЗАПУСТИТЬ", self.toggle_run, accent=True)
         self.run_button.pack(side="left")
@@ -613,6 +624,7 @@ class LifeLabApp:
         self.root.bind_all("<Control-s>", lambda _e: self.save())
         self.root.bind_all("<Control-o>", lambda _e: self.load())
         self.root.bind("<Control-e>", self._key_experiment)
+        self.root.bind("<Control-Shift-E>", lambda event: self._game_shortcut(event, self.open_scenario_studio))
         self.root.bind("<Control-l>", lambda _e: self.research_ui.show("Родословная"))
         shortcuts = {
             "<Control-z>": self.undo_action,
@@ -659,6 +671,17 @@ class LifeLabApp:
             return
         self.suite_window = ExperimentStudio(self)
 
+    def open_scenario_studio(self) -> None:
+        if self.world.mode != "ecosystem":
+            messagebox.showinfo("Лаборатория сценариев",
+                "Сценарии работают с экосистемой. Переключите режим в панели слева.")
+            return
+        if self.scenario_window and self.scenario_window.window.winfo_exists():
+            self.scenario_window.window.lift()
+            self.scenario_window.window.focus_set()
+            return
+        self.scenario_window = ScenarioWorkbench(self)
+
     def _key_experiment(self, event: tk.Event[Any]) -> str | None:
         if event.widget.winfo_toplevel() is not self.root:
             return None
@@ -666,7 +689,7 @@ class LifeLabApp:
         return "break"
 
     def _update_action_toolbar(self, width: int) -> None:
-        compact=width<900
+        compact=logical_width(width, self.screen_dpi)<1010
         if compact == self._actions_compact:
             return
         self._actions_compact=compact
@@ -685,7 +708,7 @@ class LifeLabApp:
         if abs(width-self._last_layout_width) < 15:
             return
         self._last_layout_width = width
-        count = permitted_panels(width)
+        count = permitted_panels(width, self.screen_dpi)
         if count == 0 and (self.left_visible or self.right_visible):
             self.left_visible = self.right_visible = False
             self._sync_panel_visibility()
@@ -711,7 +734,7 @@ class LifeLabApp:
         self._mark_dirty()
 
     def toggle_panel(self, side: str) -> None:
-        compact=permitted_panels(self.root.winfo_width()) < 2
+        compact=permitted_panels(self.root.winfo_width(), self.screen_dpi) < 2
         if side=="left":
             self.left_visible=not self.left_visible
             if compact and self.left_visible:

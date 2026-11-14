@@ -6,11 +6,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   windows-build:
     runs-on: windows-2022
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,14 +27,48 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name Life --hidden-import matplotlib.backends.backend_tkagg --hidden-import mpl_toolkits.mplot3d main.py
-      - name: Smoke-test bundled executable (no Python CLI)
+      - name: Smoke-test packaged executable
         shell: pwsh
         run: |
           $p = Start-Process -FilePath '.\dist\Life\Life.exe' -ArgumentList '--smoke-test' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "Bundled executable smoke test failed: $($p.ExitCode)" }
-      - name: Upload Windows package for manual acceptance
+          if ($p.ExitCode -ne 0) { throw "Bundled engine smoke test failed: $($p.ExitCode)" }
+      - name: Test packaged UI and save acceptance report
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'acceptance' | Out-Null
+          $report = (Resolve-Path 'acceptance').Path
+          $p = Start-Process -FilePath '.\dist\Life\Life.exe' -ArgumentList @('--ui-smoke-test', "`"$report`"") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Bundled UI smoke test failed: $($p.ExitCode)" }
+          if (-not (Test-Path 'acceptance\ui-report.json')) { throw 'Missing acceptance report' }
+          Get-Content 'acceptance\ui-report.json'
+      - name: Package Windows x64 distribution
+        shell: pwsh
+        run: |
+          $version = python -c "from life_lab import __version__; print(__version__)"
+          Compress-Archive -Path 'dist\Life' -DestinationPath "Life-v${version}-Windows-x64.zip" -CompressionLevel Optimal
+      - name: Upload acceptance artifact
         uses: actions/upload-artifact@v4
         with:
           name: Life-Windows-x64-acceptance
-          path: dist/Life/
+          path: |
+            dist/Life/
+            acceptance/
           if-no-files-found: error
+      - name: Publish verified Windows archive to release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "from life_lab import __version__; print(__version__)"
+          $tag = "v$version"
+          $asset = "Life-v${version}-Windows-x64.zip"
+          $ready = $false
+          for ($i = 0; $i -lt 40; $i++) {
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Start-Sleep -Seconds 10
+          }
+          if (-not $ready) { throw "GitHub Release $tag not found after waiting" }
+          gh release upload $tag $asset --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload Windows archive to $tag" }

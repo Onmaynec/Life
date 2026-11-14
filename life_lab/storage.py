@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from zipfile import ZipFile, BadZipFile
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,33 @@ from .lineage import Pedigree
 
 
 FORMAT_VERSION = 5
+# Limits also apply to malformed/malicious NPZ archives, not only decoded worlds.
+# Valid 700x500 ecosystem saves with genealogy fit comfortably below these.
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_EXPANDED_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 48
+
+
+def _check_archive_size(path: str | Path) -> None:
+    """Reject oversized NPZ inputs before NumPy decompresses any member."""
+    source = Path(path)
+    if source.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("Файл мира превышает допустимый размер")
+    try:
+        with ZipFile(source, "r") as archive:
+            members = archive.infolist()
+            if not members or len(members) > MAX_ARCHIVE_MEMBERS:
+                raise ValueError("Неправильное количество элементов сохранения")
+            if any(item.file_size > MAX_MEMBER_BYTES or item.file_size < 0
+                   for item in members):
+                raise ValueError("Слишком большой элемент сохранения")
+            if sum(item.file_size for item in members) > MAX_EXPANDED_BYTES:
+                raise ValueError("Превышен лимит распакованных данных")
+            if len({item.filename for item in members}) != len(members):
+                raise ValueError("Повторяющиеся элементы сохранения")
+    except BadZipFile as error:
+        raise ValueError("Некорректный архив сохранения") from error
 
 
 def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
@@ -70,6 +98,7 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
 
 def load_document(path: str | Path) -> tuple[CellularAutomaton | Ecosystem, ExperimentHistory]:
     """Read the simulation and any recorded measurements from a .lifelab file."""
+    _check_archive_size(path)
     with np.load(path, allow_pickle=False) as archive:
         metadata = json.loads(str(archive["metadata"].item()))
         if metadata.get("version") not in (1, 2, 3, 4, FORMAT_VERSION):
@@ -134,6 +163,7 @@ def load_world(path: str | Path) -> CellularAutomaton | Ecosystem:
 
 def load_research(path: str | Path) -> ResearchLog:
     """Load optional v0.5 research history; earlier worlds start with an empty journal."""
+    _check_archive_size(path)
     with np.load(path, allow_pickle=False) as archive:
         if "research" not in archive:
             return ResearchLog()
