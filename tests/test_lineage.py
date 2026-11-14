@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -28,6 +29,24 @@ class PedigreeTests(unittest.TestCase):
         self.assertEqual(p.records[child].offspring, 1)
         self.assertEqual(p.summary()["families"], 1)
         self.assertEqual(p.summary()["max_depth"], 2)
+
+    def test_archive_prunes_dead_history_but_keeps_all_living_ids(self):
+        with mock.patch("life_lab.lineage.MAX_ARCHIVE", 4), \
+             mock.patch("life_lab.lineage.PRUNE_BATCH", 2):
+            p = Pedigree((20, 20))
+            positions = [(1, x) for x in range(8)]
+            for y, x in positions:
+                p.founder(y, x, 2, 0, (1, 2, 1))
+            for y, x in positions[:4]:
+                p.die(y, x, 1, "тест")
+            for x in range(8, 11):
+                p.founder(1, x, 2, 2, (1, 2, 1))
+            live = int(np.count_nonzero(p.ids))
+            self.assertEqual(live, 7)
+            self.assertEqual(len(p.records), live)
+            self.assertEqual(p.lost_records, 4)
+            for y, x in np.argwhere(p.ids):
+                self.assertIsNotNone(p.get(int(y), int(x)))
 
     def test_movement_death_and_record_kept(self):
         p = Pedigree((20, 20))

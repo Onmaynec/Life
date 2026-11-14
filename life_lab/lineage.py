@@ -2,8 +2,9 @@
 
 This is a *pedigree*, not a phylogenetic inference: animals reproduce asexually
 and the parent link is an explicit simulation event. Plants are not tracked.
-The record archive is capped to bound long-running experiments. Old dead
-records may be pruned, while all living identities are retained.
+The historical archive is bounded for long-running experiments. Living
+identities are mandatory; when they alone exceed the target, dead history is
+discarded and the retained record count follows the live population.
 """
 from __future__ import annotations
 
@@ -68,7 +69,9 @@ class Pedigree:
         if ancestor:
             ancestor.offspring += 1
         if len(self.records) > MAX_ARCHIVE + PRUNE_BATCH:
-            self._prune()
+            dead_count = len(self.records) - int(np.count_nonzero(self.ids))
+            if dead_count > PRUNE_BATCH:
+                self._prune()
         return uid
 
     def founder(self, y: int, x: int, species: int, generation: int,
@@ -139,7 +142,12 @@ class Pedigree:
 
     def _prune(self) -> None:
         alive = set(map(int, self.ids[self.ids != 0]))
-        # Retain the ancestors of every living animal to keep the visible trees intact.
+        target_size = max(MAX_ARCHIVE, len(alive))
+        excess = len(self.records) - target_size
+        if excess <= 0:
+            return
+        # Prefer keeping visible ancestry, but never let dead history grow
+        # without bound. ancestors() stops safely at a pruned link.
         protected = set(alive)
         for uid in alive:
             seen = set()
@@ -150,9 +158,13 @@ class Pedigree:
                     break
                 uid = record.parent
                 protected.add(uid)
-        candidates = [uid for uid, rec in self.records.items()
-                      if rec.died is not None and uid not in protected]
-        for uid in sorted(candidates)[:max(PRUNE_BATCH, len(self.records) - MAX_ARCHIVE)]:
+        unprotected = [uid for uid, rec in self.records.items()
+                       if rec.died is not None and uid not in protected]
+        protected_dead = [uid for uid, rec in self.records.items()
+                          if rec.died is not None and uid in protected]
+        order = sorted(unprotected, key=lambda uid: (self.records[uid].died, uid))
+        order.extend(sorted(protected_dead, key=lambda uid: (self.records[uid].died, uid)))
+        for uid in order[:excess]:
             del self.records[uid]
             self.lost_records += 1
 

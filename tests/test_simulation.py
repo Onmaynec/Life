@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from life_lab.world import CellularAutomaton, Ecosystem, neighbour_counts, parse_rule
+from life_lab.world import CellularAutomaton, Ecosystem, neighbour_counts, parse_rule, _grid_distance_squared
 from life_lab.patterns import PATTERNS, pattern_array, place_pattern, encode_rle, decode_rle
 from life_lab.storage import save_world, load_world
 
@@ -105,6 +105,16 @@ class GameOfLifeTests(unittest.TestCase):
                     np.testing.assert_array_equal(world.energy, loaded.energy)
                 else:
                     self.assertEqual(world.rule, loaded.rule)
+
+
+class RLEValidationTests(unittest.TestCase):
+    def test_invalid_rule_is_rejected_during_decode(self):
+        with self.assertRaises(ValueError):
+            decode_rle("x = 1, y = 1, rule = B9/S23\no!")
+
+    def test_toroidal_distance_uses_shortest_path(self):
+        self.assertEqual(_grid_distance_squared((0, 5), (19, 5), 20, 20, True), 1)
+        self.assertEqual(_grid_distance_squared((0, 5), (19, 5), 20, 20, False), 361)
 
 
 if __name__ == "__main__":

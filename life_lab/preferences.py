@@ -50,7 +50,7 @@ class Preferences:
         overlay = data.get("overlay", True)
         chart_fill = data.get("chart_fill", True)
         autosave = data.get("autosave", True)
-        return cls(palette=palette if isinstance(palette, str) and palette in PALETTES else "Аврора",
+        return cls(palette=palette if isinstance(palette, str) and palette in PALETTES else "Графит",
                    style=style if isinstance(style, str) and style in STYLES else "Свечение",
                    grid=grid if type(grid) is bool else True,
                    trails=trails if type(trails) is bool else True,

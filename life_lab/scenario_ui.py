@@ -170,7 +170,9 @@ class ScenarioWorkbench:
         try:
             kind = next(k for k, title in INTERVENTION_KINDS.items() if title == self.kind.get())
             event = Intervention(int(self.at.get()), kind, float(self.amount.get()))
-            event.validate(int(self.duration.get()), ecology_enabled=self.app.world.ecology.enabled)
+            event.validate(int(self.duration.get()),
+                           ecology_enabled=self.app.world.ecology.enabled,
+                           toxins_enabled=self.app.world.ecology.toxins)
             if len(self.pending) >= 32:
                 raise ValueError("Не более 32 воздействий")
             self.pending.append(event)

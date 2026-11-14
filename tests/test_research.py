@@ -56,6 +56,12 @@ class EditorResearchTests(unittest.TestCase):
         grid=np.array([[1,0,0],[0,1,1],[0,0,1]],dtype=bool)
         self.assertEqual(_clusters(grid),(2,3))
 
+    def test_clusters_follow_toroidal_edges(self):
+        grid = np.zeros((5, 5), dtype=bool)
+        grid[2, 0] = grid[2, 4] = True
+        self.assertEqual(_clusters(grid, wrap=False), (2, 1))
+        self.assertEqual(_clusters(grid, wrap=True), (1, 2))
+
     def test_readonly_measurement_and_empty_world(self):
         world=CellularAutomaton(20,20)
         world.paint(3,3,1);world.paint(4,3,1)
@@ -82,6 +88,34 @@ class EditorResearchTests(unittest.TestCase):
         np.testing.assert_array_equal(copy,world.nutrients)
         with self.assertRaises(ValueError):
             spatial_field(world,'Несуществующий')
+
+    def test_cluster_measurements_are_not_repeated_as_fresh_data(self):
+        world = CellularAutomaton(20, 20)
+        world.cells[2, 2] = 1
+        log = ResearchLog()
+        log.capture(world)
+        world.generation = 1
+        world.cells[2, 2] = 0
+        world.cells[2, 3] = 1
+        log.capture(world)
+        self.assertIsNone(log.records[-1]["clusters"])
+        self.assertIsNone(log.records[-1]["largest_cluster"])
+        self.assertIsNone(log.records[-1]["cluster_generation"])
+        world.generation = 5
+        log.capture(world)
+        self.assertEqual(log.records[-1]["cluster_generation"], 5)
+        self.assertIsNotNone(log.records[-1]["clusters"])
+
+    def test_legacy_unsampled_cluster_values_are_invalidated(self):
+        world = CellularAutomaton(20, 20)
+        row = measure(world)
+        row["generation"] = 1
+        row["clusters"] = 7
+        row["largest_cluster"] = 9
+        row.pop("cluster_generation")
+        restored = ResearchLog.from_records([row])
+        self.assertIsNone(restored.records[0]["clusters"])
+        self.assertIsNone(restored.records[0]["largest_cluster"])
 
     def test_research_log_export_and_validation(self):
         world=CellularAutomaton(20,20)
@@ -124,6 +158,14 @@ class ClimateTests(unittest.TestCase):
         repeated=climate_values(97,settings)
         self.assertEqual(one['season'],repeated['season'])
         self.assertAlmostEqual(float(one['temperature']),float(repeated['temperature']))
+
+    def test_disabled_season_cycle_has_no_seasonal_modifiers(self):
+        settings = EcologySettings(enabled=True, season_cycle=False, solar_cycle=False)
+        first, later = climate_values(0, settings), climate_values(1200, settings)
+        self.assertEqual(first["season"], "Без сезона")
+        self.assertEqual(later["season"], "Без сезона")
+        self.assertEqual(first["temperature"], later["temperature"])
+        self.assertEqual(first["sunlight"], later["sunlight"])
 
     def test_diffusion_conserves_total_without_wrap(self):
         for wrap in (True,False):

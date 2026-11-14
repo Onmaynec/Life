@@ -25,6 +25,48 @@ MAX_MEMBER_BYTES = 256 * 1024 * 1024
 MAX_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 48
 
+_ARRAY_LIMITS = {
+    "energy": (-10.0, 100.0, False),
+    "trait": (0.65, 1.45, False),
+    "sight": (1.0, 3.0, False),
+    "fertility": (0.70, 1.35, False),
+    "nutrients": (0.0, 100.0, False),
+    "moisture": (0.0, 100.0, False),
+    "age": (0, 65535, True),
+    "seeds": (0, 255, True),
+    "organic": (0.0, 100.0, False),
+    "toxins": (0.0, 100.0, False),
+    "altitude": (0.0, 1.0, False),
+}
+
+
+def _restore_array(archive: Any, world: Ecosystem, key: str) -> None:
+    """Validate an NPZ layer before casting it into the model's fixed dtype."""
+    try:
+        arr = archive[key]
+    except KeyError as error:
+        raise ValueError(f"В сохранении отсутствует массив: {key}") from error
+    target = getattr(world, key)
+    low, high, integer = _ARRAY_LIMITS[key]
+    if (arr.shape != target.shape or arr.dtype.kind not in "iuf"
+            or not np.isfinite(arr).all()):
+        raise ValueError(f"Повреждённый массив: {key}")
+    if integer and arr.dtype.kind not in "iu":
+        raise ValueError(f"Массив {key} должен содержать целые значения")
+    if np.any(arr < low) or np.any(arr > high):
+        raise ValueError(f"Значения массива {key} выходят за допустимый диапазон")
+    converted = arr.astype(target.dtype, copy=False)
+    if target.dtype.kind == "f" and not np.isfinite(converted).all():
+        raise ValueError(f"Переполнение массива {key} при загрузке")
+    target[:] = converted
+
+
+def _metadata_counter(metadata: dict[str, Any], key: str) -> int:
+    value = metadata.get(key, 0)
+    if type(value) is not int or value < 0:
+        raise ValueError(f"Некорректный счётчик сохранения: {key}")
+    return value
+
 
 def _check_archive_size(path: str | Path) -> None:
     """Reject oversized NPZ inputs before NumPy decompresses any member."""
@@ -97,57 +139,72 @@ def save_world(world: CellularAutomaton | Ecosystem, path: str | Path,
 
 
 def load_document(path: str | Path) -> tuple[CellularAutomaton | Ecosystem, ExperimentHistory]:
-    """Read the simulation and any recorded measurements from a .lifelab file."""
+    """Read a world only after validating every layer and its destination dtype."""
     _check_archive_size(path)
     with np.load(path, allow_pickle=False) as archive:
-        metadata = json.loads(str(archive["metadata"].item()))
-        if metadata.get("version") not in (1, 2, 3, 4, FORMAT_VERSION):
+        try:
+            metadata = json.loads(str(archive["metadata"].item()))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("Повреждённые метаданные сохранения") from error
+        if not isinstance(metadata, dict):
+            raise ValueError("Метаданные сохранения должны быть объектом")
+        version = metadata.get("version")
+        if type(version) is not int or version not in (1, 2, 3, 4, FORMAT_VERSION):
             raise ValueError("Неподдерживаемая версия сохранения")
-        w, h = int(metadata["width"]), int(metadata["height"])
+        w, h = metadata.get("width"), metadata.get("height")
+        if type(w) is not int or type(h) is not int:
+            raise ValueError("Размеры мира должны быть целыми числами")
         CellularAutomaton._validate_dimensions(w, h)
-        cells = archive["cells"]
-        if cells.shape != (h, w) or not np.isin(cells, [0, 1, 2, 3]).all():
+        wrap = metadata.get("wrap", False)
+        if type(wrap) is not bool:
+            raise ValueError("Неверный параметр границ мира")
+        try:
+            cells = archive["cells"]
+        except KeyError as error:
+            raise ValueError("В сохранении отсутствует поле клеток") from error
+        if (cells.shape != (h, w) or cells.dtype.kind not in "iu"
+                or not np.isin(cells, [0, 1, 2, 3]).all()):
             raise ValueError("Повреждённое состояние клеток")
         mode = metadata.get("mode")
         if mode == "classic":
             if np.max(cells) > 1:
                 raise ValueError("В классическом режиме клетка должна быть 0 или 1")
-            world: CellularAutomaton | Ecosystem = CellularAutomaton(
-                w, h, metadata.get("rule", "B3/S23"), bool(metadata.get("wrap", False)))
+            rule = metadata.get("rule", "B3/S23")
+            if not isinstance(rule, str):
+                raise ValueError("Неверное правило классического автомата")
+            world: CellularAutomaton | Ecosystem = CellularAutomaton(w, h, rule, wrap)
         elif mode == "ecosystem":
-            world = Ecosystem(w, h, wrap=bool(metadata.get("wrap", False)))
+            world = Ecosystem(w, h, wrap=wrap)
             for key in ("energy", "trait", "nutrients"):
-                arr = archive[key]
-                if arr.shape != cells.shape or not np.isfinite(arr).all():
-                    raise ValueError(f"Повреждённый массив: {key}")
-                getattr(world, key)[:] = arr
-            if metadata["version"] >= 2:
+                _restore_array(archive, world, key)
+            if version >= 2:
                 for key in ("sight", "fertility"):
-                    arr = archive[key]
-                    if arr.shape != cells.shape or not np.isfinite(arr).all():
-                        raise ValueError(f"Повреждённый массив: {key}")
-                    getattr(world, key)[:] = arr
-            if metadata["version"] >= 4:
+                    _restore_array(archive, world, key)
+            if version >= 4:
                 for key in ("moisture", "age", "seeds", "organic", "toxins", "altitude"):
-                    arr = archive[key]
-                    if arr.shape != cells.shape or not np.isfinite(arr).all():
-                        raise ValueError(f"Повреждённый массив: {key}")
-                    getattr(world, key)[:] = arr
+                    _restore_array(archive, world, key)
                 world.ecology = EcologySettings.from_dict(metadata.get("ecology", {}))
-            world.mutations = int(metadata.get("mutations", 0))
+            world.mutations = _metadata_counter(metadata, "mutations")
             if "rng_state" in metadata:
-                world._rng.bit_generator.state = metadata["rng_state"]
-            if metadata["version"] >= 5:
-                world.lineage = Pedigree.from_dict(archive["animal_ids"], metadata["lineage"], cells)
+                try:
+                    world._rng.bit_generator.state = metadata["rng_state"]
+                except (TypeError, ValueError, KeyError) as error:
+                    raise ValueError("Повреждённое состояние генератора случайных чисел") from error
+            if version >= 5:
+                try:
+                    world.lineage = Pedigree.from_dict(
+                        archive["animal_ids"], metadata.get("lineage"), cells)
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError("Повреждённая родословная сохранения") from error
         else:
             raise ValueError("Неизвестный режим симуляции")
         world.cells[:] = cells
-        world.generation = max(0, int(metadata.get("generation", 0)))
-        if isinstance(world, Ecosystem) and metadata["version"] < 5:
+        world.generation = _metadata_counter(metadata, "generation")
+        if isinstance(world, Ecosystem) and version < 5:
             world.rebuild_lineage()
-        world.total_births = max(0, int(metadata.get("total_births", 0)))
-        world.total_deaths = max(0, int(metadata.get("total_deaths", 0)))
-        if metadata["version"] >= 3 and "history" in archive:
+        world.total_births = _metadata_counter(metadata, "total_births")
+        world.total_deaths = _metadata_counter(metadata, "total_deaths")
+        if version >= 3 and "history" in archive:
             history = ExperimentHistory.from_records(json.loads(str(archive["history"].item())))
             if history.records and history.records[-1]["generation"] > world.generation:
                 raise ValueError("История содержит поколения из будущего")

@@ -9,7 +9,7 @@ import unittest
 import numpy as np
 
 from life_lab.chrome import _rgb, dark_titlebar
-from life_lab.experiment_archive import StudyCollection, import_study
+from life_lab.experiment_archive import ImportedStudy, StudyCollection, import_study
 from life_lab.experiment_suite import ExperimentPlan, run_experiment
 from life_lab.instruments import spatial_field
 from life_lab.layout import permitted_panels, dialog_dimensions, window_dimensions
@@ -17,6 +17,7 @@ from life_lab.lineage_analysis import compare_families, living_families, trait_m
 from life_lab.smoke import run_smoke
 from life_lab.storage import save_world, load_world
 from life_lab.world import CellularAutomaton, Ecosystem
+from life_lab.preferences import Preferences
 
 
 class ExperimentArchiveTests(unittest.TestCase):
@@ -36,6 +37,17 @@ class ExperimentArchiveTests(unittest.TestCase):
         self.assertTrue(study.complete)
         self.assertTrue(study.curve("population"))
         self.assertEqual(study.curve("soil"),[])
+
+    def test_curves_average_repetitions_without_mixing_variants(self):
+        study = ImportedStudy("synthetic", self.plan, True, False, (), (
+            {"variant": 1, "step": 0, "population": 10},
+            {"variant": 1, "step": 0, "population": 14},
+            {"variant": 2, "step": 0, "population": 100},
+        ))
+        self.assertEqual(study.curve("population", 1), [(0, 12.0)])
+        self.assertEqual(study.curve("population", 2), [(0, 100.0)])
+        with self.assertRaises(ValueError):
+            study.curve("population", 3)
 
     def test_atomic_import_and_malformed_json(self):
         coll = StudyCollection()
@@ -138,6 +150,8 @@ class LineageAnalysisTests(unittest.TestCase):
 
 
 class SpatialAndResponsiveTests(unittest.TestCase):
+    def test_invalid_saved_palette_uses_neutral_default(self):
+        self.assertEqual(Preferences.from_dict({"palette": "missing"}).palette, "Графит")
     def test_spatial_aggregation(self):
         world=CellularAutomaton(20,20)
         world.cells[:3,:3] = 1

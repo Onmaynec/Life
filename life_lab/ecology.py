@@ -103,8 +103,11 @@ def climate_values(generation: int, settings: EcologySettings) -> dict[str, floa
     sun_phase = 2 * math.pi * (generation % 24) / 24 if settings.solar_cycle else 0
     sunlight = 0.65 + 0.30 * math.cos(season) + (0.20 * math.cos(sun_phase) if settings.solar_cycle else 0)
     temperature = (settings.heat - 0.5) * 1.3 + (0.36 * math.sin(season) if settings.season_cycle else 0)
+    season_name = (("Весна", "Лето", "Осень", "Зима")
+                   [int(generation / settings.season_length * 4) % 4]
+                   if settings.season_cycle else "Без сезона")
     return {"sunlight": max(0.1, min(1.3, sunlight)), "temperature": temperature,
-            "season": ("Весна", "Лето", "Осень", "Зима")[int(generation / settings.season_length * 4) % 4]}
+            "season": season_name}
 
 
 def environmental_step(world: Any) -> dict[str, int]:
@@ -187,6 +190,7 @@ def environmental_step(world: Any) -> dict[str, int]:
         fertile = (cells == 0) & (wet > 40) & (minerals > 50)
         sprout = fertile & (rng.random(cells.shape) < 0.00022 * sun)
         cells[sprout] = 1
+        age[sprout] = 0
         world.total_births += int(np.count_nonzero(sprout))
         world.last_births += int(np.count_nonzero(sprout))
     # 13: heat/cold stress drains animal energy, reversible with climate.
@@ -214,6 +218,7 @@ def environmental_step(world: Any) -> dict[str, int]:
         ready = (cells == 0) & (world.seeds > 0) & (wet > 45) & (minerals > 26)
         germ = ready & (rng.random(cells.shape) < .014 * sun)
         cells[germ] = 1
+        age[germ] = 0
         world.seeds[germ] = 0
         new = int(np.count_nonzero(germ))
         world.total_births += new
@@ -225,8 +230,11 @@ def environmental_step(world: Any) -> dict[str, int]:
             dry = (cells == 2) & (wet < 16)
             moved = np.argwhere(dry)
             for y,x in moved[:min(len(moved),30)]:
-                ny,nx=int(y+dy),int(x+dx)
-                if 0 <= ny < world.height and 0 <= nx < world.width and cells[ny,nx] == 0 and wet[ny,nx] > wet[y,x]:
+                ny, nx = int(y + dy), int(x + dx)
+                if world.wrap:
+                    ny, nx = ny % world.height, nx % world.width
+                if ((world.wrap or (0 <= ny < world.height and 0 <= nx < world.width))
+                        and cells[ny, nx] == 0 and wet[ny, nx] > wet[y, x]):
                     world.lineage.move(int(y), int(x), ny, nx)
                     cells[ny,nx] = 2;cells[y,x]=0
                     for field,initial in ((world.energy,0),(world.age,0),(world.trait,1),(world.sight,2),(world.fertility,1)):
@@ -244,6 +252,7 @@ def environmental_step(world: Any) -> dict[str, int]:
             plant_losses |= burn
             minerals[burn] += 9
     dead = plant_losses & (cells != 0)
+    dead_plants = dead & (cells == 1)
     lost = int(np.count_nonzero(dead))
     # 19: dead organisms return nutrients to soil.
     if settings.decomposition:
@@ -258,7 +267,9 @@ def environmental_step(world: Any) -> dict[str, int]:
     world.sight[dead] = 2
     world.fertility[dead] = 1
     age[dead] = 0
-    world.seeds[dead & (wet > 10)] = np.minimum(255,world.seeds[dead & (wet > 10)].astype(np.uint16)+2).astype(np.uint8)
+    seed_deaths = dead_plants & (wet > 10)
+    world.seeds[seed_deaths] = np.minimum(
+        255, world.seeds[seed_deaths].astype(np.uint16) + 2).astype(np.uint8)
     np.clip(wet, 0, 100, out=wet)
     np.clip(minerals, 0, 100, out=minerals)
     np.clip(world.toxins, 0, 100, out=world.toxins)
