@@ -1184,6 +1184,7 @@ class LifeLabApp:
         self.experiment.record(self.world, events)
         self.research_log.capture(self.world, events)
         self.research_ui.check_extinction()
+        self.research_ui.check_critical_event()
         if self.world.generation % 5 == 0:
             self.research_ui.refresh()
         self._update_stats()

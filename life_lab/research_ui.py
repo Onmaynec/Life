@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 from .ecology import EcologySettings, climate_values
 from .instruments import MEASURES, measure, spatial_field, SPATIAL_UNITS
+from .timeline import TimelineEvent, events_between, scan_timeline, export_timeline_csv
 from .pattern_tools import transform, shift
 from .patterns import PATTERNS, pattern_array, place_pattern
 from .skins import skin
@@ -69,12 +70,16 @@ class ResearchWorkspace:
         self.pattern_selected = "Глайдер"
         self.pattern_image = pattern_array("Глайдер")
         self.alert_extinction = tk.BooleanVar(value=False)
+        self.alert_critical_event = tk.BooleanVar(value=False)
+        self.timeline_sensitivity = tk.StringVar(value="Обычная")
+        self.timeline_filter = tk.StringVar(value="Все")
+        self.timeline_visible: list[TimelineEvent] = []
         self.animate_graphs = tk.BooleanVar(value=True)
         self.field_name = tk.StringVar(value="Плотность")
         self.metric_name = tk.StringVar(value="Численность")
         self.tabs = tk.Frame(host, bg=self.colors.panel)
         self.tabs.pack(fill="x", pady=(0, 11))
-        for index, name in enumerate(("Обзор","Анализ","3D","Среда","Каталог","Родословная")):
+        for index, name in enumerate(("Обзор","Анализ","3D","Среда","Каталог","Родословная","События")):
             button = app._button(self.tabs, name.upper(), lambda n=name:self.show(n))
             button.configure(font=("Segoe UI",8,"bold"),padx=4,pady=8)
             button.grid(row=index // 3,column=index % 3,sticky="ew",padx=2,pady=2)
@@ -89,6 +94,7 @@ class ResearchWorkspace:
         self._build_environment()
         self._build_library()
         self._build_lineage()
+        self._build_timeline()
         self._select_tab()
 
     def _heading(self, parent: tk.Frame, title: str, description: str = "") -> None:
@@ -152,6 +158,98 @@ class ResearchWorkspace:
                         bg=self.colors.panel,fg=self.colors.text,selectcolor=self.colors.surface,
                         activebackground=self.colors.panel,anchor="w",highlightthickness=0)
         self.pause_checkbox.pack(fill="x",pady=(12,2))
+
+    def _build_timeline(self) -> None:
+        """Read-only observations derived from recorded generations."""
+        p = self.pages["События"]
+        self._heading(p, "ЛЕНТА СОБЫТИЙ",
+                      "Переломы развития мира по сохранённым измерениям. "
+                      "При редких замерах точный момент события неизвестен.")
+        self.app._label(p, "Чувствительность", 9).pack(anchor="w", pady=(0, 3))
+        sensitivity = ttk.Combobox(p, textvariable=self.timeline_sensitivity,
+                                   values=("Низкая", "Обычная", "Высокая"),
+                                   state="readonly", style="Lab.TCombobox")
+        sensitivity.pack(fill="x", pady=(0, 10))
+        sensitivity.bind("<<ComboboxSelected>>", lambda _e: self.refresh(force=True))
+        self.app._label(p, "Группа событий", 9).pack(anchor="w", pady=(0, 3))
+        category = ttk.Combobox(p, textvariable=self.timeline_filter,
+                                values=("Все", "Популяция", "Виды", "Ресурсы", "Родословные"),
+                                state="readonly", style="Lab.TCombobox")
+        category.pack(fill="x", pady=(0, 10))
+        category.bind("<<ComboboxSelected>>", lambda _e: self.refresh(force=True))
+        self.timeline_summary = self.app._label(p, "Пока нет наблюдений", 9, self.colors.muted)
+        self.timeline_summary.pack(anchor="w", pady=(0, 6))
+        self.timeline_list = tk.Listbox(p, height=11, bg=self.colors.base,
+                           fg=self.colors.text, selectbackground=self.colors.accent,
+                           selectforeground=self.colors.base, borderwidth=0,
+                           highlightthickness=0, activestyle="none",
+                           font=("Segoe UI", 9), exportselection=False)
+        self.timeline_list.pack(fill="x", pady=(0, 8))
+        self.timeline_list.bind("<<ListboxSelect>>", self._show_timeline_selection)
+        self.timeline_detail = tk.Label(p, text="Выберите событие", bg=self.colors.surface,
+                            fg=self.colors.text, justify="left", anchor="nw", wraplength=240,
+                            padx=10, pady=10, font=("Segoe UI", 9), height=5)
+        self.timeline_detail.pack(fill="x", pady=(0, 10))
+        self.app._button(p, "ЭКСПОРТ ЛЕНТЫ CSV", self.export_timeline).pack(fill="x", pady=2)
+        tk.Checkbutton(p, text="Пауза при критическом событии",
+                       variable=self.alert_critical_event, bg=self.colors.panel,
+                       fg=self.colors.text, selectcolor=self.colors.surface,
+                       activebackground=self.colors.panel, anchor="w",
+                       highlightthickness=0, wraplength=240,
+                       font=("Segoe UI", 9)).pack(fill="x", pady=(10, 0))
+
+    def _sensitivity_code(self) -> str:
+        return {"Низкая": "low", "Обычная": "normal", "Высокая": "high"}.get(
+            self.timeline_sensitivity.get(), "normal")
+
+    def _refresh_timeline(self) -> None:
+        observations = scan_timeline(self.app.research_log.records, self._sensitivity_code())
+        category = self.timeline_filter.get()
+        matching = [event for event in observations if category == "Все" or event.category == category]
+        self.timeline_visible = list(reversed(matching[-250:]))
+        self.timeline_list.delete(0, tk.END)
+        for event in self.timeline_visible:
+            self.timeline_list.insert(tk.END,
+                f"g{event.generation:<5} · {event.severity[:1]} · {event.title}")
+        self.timeline_summary.config(text=f"Найдено: {len(matching)}  ·  показано: {len(self.timeline_visible)}")
+        self.timeline_detail.config(text="Выберите событие" if self.timeline_visible else
+                                    "В текущей истории пороговые события не обнаружены")
+
+    def _show_timeline_selection(self, _event: Any = None) -> None:
+        indexes = self.timeline_list.curselection()
+        if not indexes or indexes[0] >= len(self.timeline_visible):
+            return
+        event = self.timeline_visible[indexes[0]]
+        self.timeline_detail.config(text=f"Поколение {event.generation}  ·  {event.severity}\n"
+                    f"{event.title}\n{event.description}")
+
+    def export_timeline(self) -> None:
+        filename = filedialog.asksaveasfilename(title="Экспорт ленты событий",
+                          defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not filename:
+            return
+        try:
+            events = scan_timeline(self.app.research_log.records, self._sensitivity_code())
+            export_timeline_csv(filename, events)
+            self.app._show_hint(f"Лента событий сохранена: {Path(filename).name}")
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Ошибка экспорта", str(error))
+
+    def check_critical_event(self) -> bool:
+        """Optional pause for a new critical alert, without extra world steps."""
+        if not self.alert_critical_event.get() or not self.app.running:
+            return False
+        rows = self.app.research_log.records
+        if len(rows) < 2:
+            return False
+        critical = [event for event in events_between(rows[-2], rows[-1], self._sensitivity_code())
+                    if event.severity == "Критично"]
+        if not critical:
+            return False
+        self.app.running = False
+        self.app._update_run_button()
+        self.app._show_hint(f"Пауза: {critical[0].title} (g{critical[0].generation})")
+        return True
 
     def take_baseline(self) -> None:
         self.baseline=measure(self.app.world)
@@ -722,6 +820,8 @@ class ResearchWorkspace:
             self._show_climate()
         elif self.current=="Родословная":
             self._refresh_lineage()
+        elif self.current=="События":
+            self._refresh_timeline()
 
     def check_extinction(self)->bool:
         if not self.alert_extinction.get() or not isinstance(self.app.world,Ecosystem):

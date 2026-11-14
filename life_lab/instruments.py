@@ -145,38 +145,50 @@ def spatial_field(world: Any, name: str, *, max_side: int = 50,
         raise ValueError("Детализация должна быть от 2 до 200")
     if aggregation not in ("mean", "max", "sum"):
         raise ValueError("Неизвестный тип агрегации")
-    fields = {"Плотность": (world.cells > 0).astype(np.float32),
-              "Типы клеток": world.cells.astype(np.float32),
-              "Соседи": neighbour_counts(world.cells > 0,world.wrap).astype(np.float32)}
-    if isinstance(world,Ecosystem):
-        depth = np.zeros_like(world.cells, dtype=np.float32)
-        for yy, xx in np.argwhere(world.cells >= 2):
-            rec = world.lineage.get(int(yy), int(xx))
-            if rec is not None:
-                depth[yy, xx] = rec.depth
-        fields["Глубина родословной"] = depth
-        fields.update({"Энергия":world.energy,"Минералы":world.nutrients,
-                       "Влага":world.moisture,"Возраст":world.age.astype(np.float32),
-                       "Семена":world.seeds.astype(np.float32),
-                       "Органика":world.organic,"Токсины":world.toxins,
-                       "Рельеф":world.altitude,
-                       "Метаболизм":np.where(world.cells >= 2,world.trait,0),
-                       "Зрение":np.where(world.cells >= 2,world.sight,0),
-                       "Плодовитость":np.where(world.cells >= 2,world.fertility,0)})
-    if name not in fields:
+    # Select a single source layer. Constructing every layer is expensive on
+    # large worlds, especially the neighbourhood count and pedigree lookup.
+    if name == "Плотность":
+        source = world.cells > 0
+    elif name == "Типы клеток":
+        source = world.cells
+    elif name == "Соседи":
+        source = neighbour_counts(world.cells > 0, world.wrap)
+    elif not isinstance(world, Ecosystem):
         raise ValueError("Неизвестный пространственный показатель")
-    arr = np.asarray(fields[name], dtype=np.float32)
-    h,w = arr.shape
-    sy,sx=max(1, math.ceil(h/max_side)),max(1, math.ceil(w/max_side))
-    H,W=math.ceil(h/sy),math.ceil(w/sx)
-    # Same tile boundaries for mean/max/sum, no interpolation or synthetic cells.
-    out=np.empty((H,W),dtype=np.float32)
-    reducer={"mean":np.mean,"max":np.max,"sum":np.sum}[aggregation]
-    for y in range(H):
-        row=arr[y*sy:min(h,(y+1)*sy)]
-        for x in range(W):
-            out[y,x]=float(reducer(row[:,x*sx:min(w,(x+1)*sx)]))
-    return out
+    elif name == "Глубина родословной":
+        source = np.zeros_like(world.cells, dtype=np.float32)
+        for yy, xx in np.argwhere(world.cells >= 2):
+            record = world.lineage.get(int(yy), int(xx))
+            if record is not None:
+                source[yy, xx] = record.depth
+    elif name in ("Метаболизм", "Зрение", "Плодовитость"):
+        attribute = {"Метаболизм": "trait", "Зрение": "sight",
+                     "Плодовитость": "fertility"}[name]
+        source = np.where(world.cells >= 2, getattr(world, attribute), 0)
+    else:
+        attribute = {"Энергия": "energy", "Минералы": "nutrients",
+                     "Влага": "moisture", "Возраст": "age", "Семена": "seeds",
+                     "Органика": "organic", "Токсины": "toxins",
+                     "Рельеф": "altitude"}.get(name)
+        if attribute is None:
+            raise ValueError("Неизвестный пространственный показатель")
+        source = getattr(world, attribute)
+    arr = np.asarray(source, dtype=np.float32)
+    h, w = arr.shape
+    sy, sx = max(1, math.ceil(h / max_side)), max(1, math.ceil(w / max_side))
+    # Reduce each tile in NumPy. `reduceat` keeps the smaller edge tiles
+    # instead of padding with zeros (which would skew averages).
+    starts_y = np.arange(0, h, sy)
+    starts_x = np.arange(0, w, sx)
+    if aggregation == "max":
+        return np.maximum.reduceat(np.maximum.reduceat(arr, starts_y, axis=0), starts_x, axis=1)
+    total = np.add.reduceat(np.add.reduceat(arr, starts_y, axis=0), starts_x, axis=1)
+    if aggregation == "sum":
+        return total
+    sizes_y = np.diff(np.append(starts_y, h))
+    sizes_x = np.diff(np.append(starts_x, w))
+    return (total / (sizes_y[:, None] * sizes_x[None, :])).astype(np.float32, copy=False)
+
 
 
 class ResearchLog:
