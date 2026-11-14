@@ -221,7 +221,15 @@ class ResearchWorkspace:
             x=xmin+(generation-xfirst)/max(1,xlast-xfirst)*(xmax-xmin)
             y=ymax-(value-a)/(b-a)*(ymax-ymin)
             coords.extend((x,y))
+        from .plotting import hex_blend
+        fill=hex_blend(self.colors.base,self.colors.accent,0.29)
+        if len(coords)>=4:
+            cv.create_polygon(coords[0],ymax,*coords,coords[-2],ymax,
+                              fill=fill,stipple="gray25",outline="")
         cv.create_line(*coords,fill=self.colors.accent,width=2.5,smooth=False)
+        if len(coords)>=2:
+            cv.create_oval(coords[-2]-3,coords[-1]-3,coords[-2]+3,coords[-1]+3,
+                           fill=self.colors.accent,outline=self.colors.base,width=1)
         cv.create_text(xmin,ymin-9,text=f"{b:.2f}",fill=self.colors.muted,anchor="w",font=("Segoe UI",8))
         cv.create_text(xmin,ymax+10,text=f"{a:.2f}",fill=self.colors.muted,anchor="w",font=("Segoe UI",8))
         cv.create_text(xmax,ymax+13,text=f"g {xlast}",fill=self.colors.muted,anchor="e",font=("Segoe UI",8))

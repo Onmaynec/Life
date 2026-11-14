@@ -37,8 +37,14 @@ PALETTES: dict[str, Palette] = {
                         ((164, 228, 106), (252, 191, 111), (237, 130, 111)), (69, 106, 64), "#638771"),
     "Ультрафиолет": Palette((17, 13, 34), (24, 20, 42), (50, 42, 78),
                            ((113, 222, 245), (178, 148, 255), (255, 113, 194)), (85, 66, 132), "#77649c"),
+    "Северное сияние": Palette((7, 12, 20), (9, 20, 25), (28, 43, 52),
+                               ((75, 239, 200), (137, 178, 255), (254, 129, 178)), (37, 85, 93), "#456270"),
+    "Карбон": Palette((9, 10, 11), (15, 17, 18), (43, 47, 49),
+                       ((220, 230, 235), (129, 183, 210), (247, 166, 110)), (66, 76, 81), "#52585b"),
+    "Сигнал": Palette((9, 11, 14), (16, 20, 25), (43, 51, 61),
+                       ((89, 208, 248), (246, 208, 110), (251, 113, 129)), (29, 91, 118), "#404e5e"),
 }
-STYLES = ("Свечение", "Мозаика", "Схема")
+STYLES = ("Свечение", "Мозаика", "Схема", "Неон", "Контуры", "Созвездие")
 
 
 def colorize(cells: np.ndarray, mode: str, palette: Palette,
@@ -115,9 +121,9 @@ def draw_view(cells: np.ndarray, *, mode: str, zoom: int, palette_name: str,
     h, w = cells.shape
     if w == 0 or h == 0:
         raise ValueError("Нельзя рисовать пустой фрагмент")
-    if zoom >= 6 and style in ("Свечение", "Мозаика"):
+    if zoom >= 6 and style in ("Свечение", "Мозаика", "Неон", "Контуры", "Созвездие"):
         # Keep a dark gutter between the individual, lit cells.
-        amount = 0.36 if style == "Свечение" else 0.22
+        amount = 0.22 if style == "Неон" else (0.36 if style == "Свечение" else 0.19)
         arr[cells != 0] = (arr[cells != 0].astype(np.float32) * amount).astype(np.uint8)
     image = Image.fromarray(arr, "RGB").resize((w * zoom, h * zoom), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(image)
@@ -147,7 +153,62 @@ def draw_view(cells: np.ndarray, *, mode: str, zoom: int, palette_name: str,
                                    fill=_pale(color, 0.12), outline=_pale(color, 0.3), width=1)
             if zoom >= 11:
                 draw.line((x0+2, y0+2, x1-2, y0+2), fill=_pale(color, 0.6), width=1)
+    if style == "Неон" and zoom >= 7:
+        canvas = image.convert("RGBA")
+        # Static sprites are cached per palette/zoom and never recomputed per cell.
+        glows = {kind: _neon_sprite(zoom, kind, palette_name) for kind in (1, 2, 3)}
+        for y, x in np.argwhere(cells != 0):
+            kind = int(cells[y, x])
+            if kind in glows:
+                canvas.alpha_composite(glows[kind], (int(x)*zoom, int(y)*zoom))
+        return canvas.convert("RGB")
+    if style == "Контуры" and zoom >= 6:
+        for y, x in np.argwhere(cells != 0):
+            kind = int(cells[y, x])
+            if not 1 <= kind <= (1 if mode == "classic" else 3):
+                continue
+            color = palette.species[kind-1]
+            left, top = int(x)*zoom, int(y)*zoom
+            pad = max(1, zoom//6)
+            draw.rounded_rectangle((left+pad, top+pad, left+zoom-pad-1, top+zoom-pad-1),
+                                   radius=max(1, zoom//5), outline=color, width=max(1,zoom//10))
+            if zoom >= 12:
+                dot=max(1,zoom//11)
+                draw.ellipse((left+zoom//2-dot, top+zoom//2-dot,
+                              left+zoom//2+dot, top+zoom//2+dot),fill=color)
+    if style == "Созвездие" and zoom >= 6:
+        # Dim pixels stay pixel aligned, with a crisp central luminous nucleus.
+        for y, x in np.argwhere(cells != 0):
+            kind=int(cells[y,x])
+            if not 1<=kind<=(1 if mode=="classic" else 3):
+                continue
+            color=palette.species[kind-1]
+            center_x=int(x)*zoom+zoom//2
+            center_y=int(y)*zoom+zoom//2
+            radius=max(1,zoom//6)
+            draw.ellipse((center_x-radius,center_y-radius,
+                          center_x+radius,center_y+radius),fill=_pale(color,0.35))
+            if zoom>=12:
+                draw.line((center_x-zoom//3,center_y,center_x+zoom//3,center_y),fill=color)
+                draw.line((center_x,center_y-zoom//3,center_x,center_y+zoom//3),fill=color)
     return image
+
+
+@lru_cache(maxsize=160)
+def _neon_sprite(size: int, kind: int, palette_name: str) -> Image.Image:
+    """Sharp luminous core and three translucent halos, drawn once per size."""
+    color=PALETTES[palette_name].species[kind-1]
+    supersample=3
+    width=size*supersample
+    out=Image.new("RGBA",(width,width),(0,0,0,0))
+    d=ImageDraw.Draw(out,"RGBA")
+    mid=width//2
+    for fraction,alpha in ((0.47,35),(0.36,55),(0.25,90),(0.145,220)):
+        r=max(1,round(width*fraction))
+        d.ellipse((mid-r,mid-r,mid+r,mid+r),fill=(*color,alpha))
+    point=max(1,width//12)
+    d.ellipse((mid-point,mid-point,mid+point,mid+point),fill=(*_pale(color,0.8),250))
+    return out.resize((size,size),Image.Resampling.LANCZOS)
 
 
 def minimap(cells: np.ndarray, *, palette_name: str, width: int = 256,

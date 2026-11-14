@@ -27,6 +27,8 @@ class Preferences:
     speed: int = 8
     skin: str = "Графит / циан"
     animation: bool = True
+    overlay: bool = True
+    chart_fill: bool = True
 
     @classmethod
     def from_dict(cls, data: object) -> "Preferences":
@@ -44,18 +46,23 @@ class Preferences:
         from .skins import SKINS
         selected_skin = data.get("skin", "Графит / циан")
         animation = data.get("animation", True)
+        overlay = data.get("overlay", True)
+        chart_fill = data.get("chart_fill", True)
         return cls(palette=palette if isinstance(palette, str) and palette in PALETTES else "Аврора",
                    style=style if isinstance(style, str) and style in STYLES else "Свечение",
                    grid=grid if type(grid) is bool else True,
                    trails=trails if type(trails) is bool else True,
                    speed=speed if type(speed) is int and 1 <= speed <= 30 else 8,
                    skin=selected_skin if isinstance(selected_skin, str) and selected_skin in SKINS else "Графит / циан",
-                   animation=animation if type(animation) is bool else True)
+                   animation=animation if type(animation) is bool else True,
+                   overlay=overlay if type(overlay) is bool else True,
+                   chart_fill=chart_fill if type(chart_fill) is bool else True)
 
     def as_dict(self) -> dict[str, str | int | bool]:
         return {"palette": self.palette, "style": self.style, "grid": self.grid,
                 "trails": self.trails, "speed": self.speed,
-                "skin": self.skin, "animation": self.animation}
+                "skin": self.skin, "animation": self.animation,
+                "overlay": self.overlay, "chart_fill": self.chart_fill}
 
 
 def load_preferences(path: Path | None = None) -> Preferences:

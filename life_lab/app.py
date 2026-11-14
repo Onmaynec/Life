@@ -25,6 +25,7 @@ from .experiment_ui import ExperimentStudio
 from .setup import WorldOptions, create_world
 from .visuals import PALETTES, STYLES, HEATMAP_FIELDS, colorize, draw_view, minimap, heatmap_view
 from .preferences import Preferences, load_preferences, save_preferences
+from .plotting import draw_history_chart
 from .world import CellularAutomaton, Ecosystem, RULE_PRESETS
 
 
@@ -57,10 +58,16 @@ class LifeLabApp:
         preferences = load_preferences()
         self.skin_var = tk.StringVar(value=preferences.skin)
         self.animation_var = tk.BooleanVar(value=preferences.animation)
+        self.overlay_var = tk.BooleanVar(value=preferences.overlay)
+        self.chart_fill_var = tk.BooleanVar(value=preferences.chart_fill)
         self._set_colors(preferences.skin)
         self.root.title(f"Life  —  v{__version__}")
-        self.root.geometry("1570x950")
-        self.root.minsize(1080, 710)
+        screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        window_w, window_h = min(1570, max(890, screen_w-80)), min(950, max(660, screen_h-110))
+        self.root.geometry(f"{window_w}x{window_h}")
+        self.root.minsize(880, 640)
+        self.left_visible = window_w >= 1200
+        self.right_visible = window_w >= 1400
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(80, lambda: dark_titlebar(self.root, BG))
@@ -131,7 +138,9 @@ class LifeLabApp:
                                          trails=self.trail_var.get(),
                                          speed=self.speed_var.get(),
                                          skin=self.skin_var.get(),
-                                         animation=self.animation_var.get()))
+                                         animation=self.animation_var.get(),
+                                         overlay=self.overlay_var.get(),
+                                         chart_fill=self.chart_fill_var.get()))
         except OSError:
             pass  # Lack of write access must not prevent the application from closing.
         if self.suite_window and self.suite_window.window.winfo_exists():
@@ -278,11 +287,11 @@ class LifeLabApp:
         wordmark.pack(side="left")
         self._label(wordmark, "life.", 23, TEXT, True).pack(anchor="w")
         self._label(wordmark, "RESEARCH STUDIO  /  ЭКСПЕРИМЕНТАЛЬНАЯ СРЕДА", 8, MUTED, True).pack(anchor="w")
-        actions = tk.Frame(header, bg=BG)
-        actions.pack(side="right")
+        actions = tk.Frame(self.root, bg=BG, padx=18, pady=8)
+        actions.pack(fill="x")
         self.live_indicator=self._label(actions, "● ПАУЗА", 9, MUTED, True)
-        self.live_indicator.pack(side="left",padx=(0,15))
-        self._button(actions, "?  СПРАВКА", self.show_help).pack(side="left", padx=(0, 7))
+        self.live_indicator.pack(side="right",padx=(10,0))
+        self._button(actions, "?", self.show_help, width=3).pack(side="left", padx=(0, 7))
         self._button(actions, "+  НОВЫЙ МИР", self.new_world_dialog).pack(side="left", padx=(0, 8))
         self._button(actions, "СОХРАНИТЬ", self.save).pack(side="left", padx=(0, 16))
         self._label(actions, "ШАГОВ / СЕК", 9, MUTED, True).pack(side="left", padx=(0, 7))
@@ -348,11 +357,11 @@ class LifeLabApp:
         self.rule_combo.bind("<<ComboboxSelected>>", self.apply_preset)
         rule_row = tk.Frame(self.rules_frame, bg=PANEL, pady=6)
         rule_row.pack(fill="x")
-        self.rule_entry = tk.Entry(rule_row, textvariable=self.rule_entry_var, bg=PANEL_2,
+        self.rule_entry = tk.Entry(rule_row, textvariable=self.rule_entry_var, width=9, bg=PANEL_2,
                                    fg=TEXT, insertbackground=TEXT, relief="flat", bd=0,
                                    font=("Consolas", 12), highlightbackground=EDGE, highlightthickness=1)
         self.rule_entry.pack(side="left", fill="x", expand=True, ipady=9)
-        self._button(rule_row, "OK", self.apply_rule).pack(side="right", padx=(6, 0))
+        self._button(rule_row, "OK", self.apply_rule, width=3).pack(side="right", padx=(6, 0))
         self.rule_entry.bind("<Return>", lambda _e: self.apply_rule())
 
         actions_panel = self._section(self.side, "Редактор мира")
@@ -431,14 +440,20 @@ class LifeLabApp:
                                        state="readonly", style="Lab.TCombobox")
         self.chart_mode.pack(fill="x", pady=(0, 7))
         self.chart_mode.bind("<<ComboboxSelected>>", lambda _e: self._draw_chart())
-        self.chart = tk.Canvas(graph_section, height=164, bg="#0D1A28", highlightthickness=0)
+        self.chart = tk.Canvas(graph_section, height=164, bg=BG, highlightthickness=0)
         self.chart.pack(fill="x")
         self.chart.bind("<Configure>", lambda _e: self._draw_chart())
-        self._label(graph_section, "120 последних записей  ·  по поколениям", 8).pack(anchor="w", pady=(6, 0))
+        self.chart.bind("<Motion>", self._chart_motion)
+        self.chart.bind("<Leave>", lambda _e: self._draw_chart())
+        self._label(graph_section, "120 поколений · наведите для просмотра значений", 8).pack(anchor="w", pady=(6, 0))
+        tk.Checkbutton(graph_section, text="Заливка графика", variable=self.chart_fill_var,
+                       command=self._draw_chart, bg=PANEL, fg=MUTED, selectcolor=PANEL_2,
+                       activebackground=PANEL, activeforeground=TEXT, highlightthickness=0,
+                       font=(FONT, 9), anchor="w").pack(fill="x", pady=(3,0))
 
         navigator = self._section(self.research_ui.overview, "Навигатор")
         navigator.pack(fill="x", pady=(0, 10))
-        self.minimap_canvas = tk.Canvas(navigator, bg="#0C1927", height=130,
+        self.minimap_canvas = tk.Canvas(navigator, bg=BG, height=130,
                                         highlightthickness=1, highlightbackground=EDGE, cursor="hand2")
         self.minimap_canvas.pack(fill="x")
         self.minimap_canvas.bind("<Button-1>", self._minimap_click)
@@ -481,35 +496,51 @@ class LifeLabApp:
         self._label(toolbar, "ПОЛЕ СИМУЛЯЦИИ", 10, TEXT, True).pack(side="left")
         self.world_mode_label = self._label(toolbar, "КОНВЕЙ  ·  B3/S23", 9, GREEN, True)
         self.world_mode_label.pack(side="right")
+        self.left_toggle = self._button(toolbar, "☷  ПАРАМЕТРЫ", lambda: self.toggle_panel("left"))
+        self.left_toggle.pack(side="left", padx=(18,4))
+        self.right_toggle = self._button(toolbar, "▦  ИССЛЕДОВАНИЕ", lambda: self.toggle_panel("right"))
+        self.right_toggle.pack(side="left")
         quick_appearance = tk.Frame(stage, bg=PANEL, padx=17, pady=5)
         quick_appearance.pack(fill="x")
-        self._label(quick_appearance, "ТЕМА", 8).pack(side="left", padx=(0, 6))
-        chosen_skin = ttk.Combobox(quick_appearance, textvariable=self.skin_var,
+        quick_top=tk.Frame(quick_appearance,bg=PANEL)
+        quick_top.pack(fill="x",pady=(0,4))
+        quick_bottom=tk.Frame(quick_appearance,bg=PANEL)
+        quick_bottom.pack(fill="x")
+        self._label(quick_top, "ТЕМА", 8).pack(side="left", padx=(0, 6))
+        chosen_skin = ttk.Combobox(quick_top, textvariable=self.skin_var,
                           values=list(SKINS), state="readonly",style="Lab.TCombobox",width=20)
         chosen_skin.pack(side="left",padx=(0,14))
         chosen_skin.bind("<<ComboboxSelected>>",self.change_skin)
-        self._label(quick_appearance, "ПАЛИТРА", 8).pack(side="left", padx=(0, 7))
-        preset = ttk.Combobox(quick_appearance, textvariable=self.palette_var,
+        self._label(quick_top, "ПАЛИТРА", 8).pack(side="left", padx=(0, 7))
+        preset = ttk.Combobox(quick_top, textvariable=self.palette_var,
                               values=list(PALETTES), state="readonly", style="Lab.TCombobox", width=13)
         preset.pack(side="left", padx=(0, 12))
         preset.bind("<<ComboboxSelected>>", self._appearance_changed)
-        self._label(quick_appearance, "ВИД", 8).pack(side="left", padx=(0, 7))
-        kind = ttk.Combobox(quick_appearance, textvariable=self.cell_style_var,
+        self._label(quick_bottom, "ВИД", 8).pack(side="left", padx=(0, 7))
+        kind = ttk.Combobox(quick_bottom, textvariable=self.cell_style_var,
                             values=STYLES, state="readonly", style="Lab.TCombobox", width=11)
         kind.pack(side="left")
         kind.bind("<<ComboboxSelected>>", self._appearance_changed)
-        self._label(quick_appearance,"СЛОЙ",8).pack(side="left",padx=(11,5))
-        layer=ttk.Combobox(quick_appearance,textvariable=self.layer_var,
+        self._label(quick_bottom,"СЛОЙ",8).pack(side="left",padx=(11,5))
+        layer=ttk.Combobox(quick_bottom,textvariable=self.layer_var,
                     values=HEATMAP_FIELDS,state="readonly",style="Lab.TCombobox",width=13)
         layer.pack(side="left")
         layer.bind("<<ComboboxSelected>>",self._appearance_changed)
+        tk.Checkbutton(quick_bottom, text="ШКАЛА", variable=self.overlay_var,
+                       command=self._mark_dirty, bg=PANEL, fg=MUTED,
+                       activebackground=PANEL, activeforeground=TEXT,
+                       selectcolor=PANEL_2, highlightthickness=0,
+                       font=(FONT, 8, "bold")).pack(side="left", padx=(8, 0))
 
         metrics = tk.Frame(stage, bg=PANEL, padx=12, pady=7)
         metrics.pack(fill="x")
         self.hud_generation = self._metric(metrics, "Поколение", "0", CYAN)
         self.hud_population = self._metric(metrics, "Живых", "0", GREEN)
         self.hud_density = self._metric(metrics, "Заполнение", "0%", YELLOW)
-        self.canvas = tk.Canvas(stage, bg="#0C1826", bd=0, highlightthickness=0, cursor="crosshair")
+        self.composition_canvas=tk.Canvas(stage,height=14,bg=PANEL,highlightthickness=0,bd=0)
+        self.composition_canvas.pack(fill="x", padx=14, pady=(0,2))
+        self.composition_canvas.bind("<Configure>", lambda _e: self._draw_composition())
+        self.canvas = tk.Canvas(stage, bg=BG, bd=0, highlightthickness=0, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True, padx=12, pady=(5, 0))
         foot = tk.Frame(stage, bg=PANEL, padx=14, pady=10)
         foot.pack(fill="x")
@@ -529,12 +560,15 @@ class LifeLabApp:
         self.performance_label = self._label(status, "", 9, GREEN)
         self.performance_label.pack(side="right")
         self.root.bind_all("<MouseWheel>", self._wheel_panels)
+        self._sync_panel_visibility()
 
     def _bind_events(self) -> None:
         self.root.bind_all("<space>", self._key_space)
         self.root.bind_all("<F1>", lambda _e: self.show_help())
         self.root.bind_all("<F10>", lambda _e: self.toggle_focus())
         self.root.bind_all("<F11>",lambda _e:self.toggle_fullscreen())
+        self.root.bind_all("<F6>",lambda _e:self.toggle_panel("left"))
+        self.root.bind_all("<F7>",lambda _e:self.toggle_panel("right"))
         self.root.bind_all("<Control-Tab>", lambda _e:self.next_research_tab())
         # File operations are deliberately allowed when a text field has focus.
         self.root.bind_all("<Control-s>", lambda _e: self.save())
@@ -592,15 +626,45 @@ class LifeLabApp:
         self.open_experiment_studio()
         return "break"
 
-    def toggle_focus(self) -> None:
-        self.focus_mode = not self.focus_mode
-        if self.focus_mode:
-            self.left_shell.pack_forget()
-            self.right_shell.pack_forget()
-        else:
-            self.left_shell.pack(side="left",fill="y",padx=(0,12),before=self.stage)
-            self.right_shell.pack(side="right",fill="y",padx=(12,0),before=self.stage)
+    def _sync_panel_visibility(self) -> None:
+        """Keep both sidebars independently collapsible without losing widget state."""
+        for shell,visible,side,pad in (
+            (self.left_shell,self.left_visible,"left",(0,12)),
+            (self.right_shell,self.right_visible,"right",(12,0))):
+            if visible:
+                if not shell.winfo_manager():
+                    shell.pack(side=side,fill="y",padx=pad,before=self.stage)
+            else:
+                shell.pack_forget()
+        if hasattr(self,"left_toggle"):
+            self.left_toggle.config(fg=GREEN if self.left_visible else MUTED)
+        if hasattr(self,"right_toggle"):
+            self.right_toggle.config(fg=GREEN if self.right_visible else MUTED)
         self._mark_dirty()
+
+    def toggle_panel(self, side: str) -> None:
+        compact=self.root.winfo_width()<1320
+        if side=="left":
+            self.left_visible=not self.left_visible
+            if compact and self.left_visible:
+                self.right_visible=False
+        elif side=="right":
+            self.right_visible=not self.right_visible
+            if compact and self.right_visible:
+                self.left_visible=False
+        else:
+            raise ValueError("unknown panel")
+        self.focus_mode=not (self.left_visible or self.right_visible)
+        self._sync_panel_visibility()
+
+    def toggle_focus(self) -> None:
+        self.focus_mode=not self.focus_mode
+        if self.focus_mode:
+            self._panels_before_focus=(self.left_visible,self.right_visible)
+            self.left_visible=self.right_visible=False
+        else:
+            self.left_visible,self.right_visible=getattr(self,"_panels_before_focus",(True,True))
+        self._sync_panel_visibility()
 
     def toggle_fullscreen(self) -> None:
         self.root.attributes("-fullscreen", not bool(self.root.attributes("-fullscreen")))
@@ -821,7 +885,7 @@ class LifeLabApp:
             ("Классика Конвея", "Каждая клетка либо жива, либо нет. Её судьба зависит от восьми соседей. Попробуйте поставить глайдер и запустить симуляцию."),
             ("Экосистема", "Растения используют питательные вещества, травоядные ищут растения, а хищники охотятся. У животных есть наследуемые признаки."),
             ("Управление", "Пробел — пауза, N — шаг. ЛКМ редактирует, ластик выбирается отдельно. ПКМ или СКМ — перемещение, колесо — масштаб, F — вписать мир."),
-            ("Наблюдение", "Справа: обзор, анализ, 3D-графики, климат и каталог структур. F10 — режим без боковых панелей, F11 — полный экран, Ctrl+Tab — вкладки."),
+            ("Наблюдение", "Справа: анализ, 3D, среда, каталог и родословные. Кнопки «Параметры» и «Исследование» скрывают панели. F10 — режим без боковых панелей, F11 — полный экран."),
         ):
             self._label(frame, title, 11, GREEN, True).pack(anchor="w", pady=(0, 4))
             tk.Label(frame, text=desc, bg=PANEL, fg=TEXT, justify="left", anchor="w",
@@ -1081,54 +1145,57 @@ class LifeLabApp:
         self.hud_population.config(text=f"{counts['population']:,}".replace(",", " "))
         self.hud_density.config(text=f"{counts['population'] / (self.world.width*self.world.height)*100:.1f}%")
         self._draw_chart()
+        self._draw_composition()
+
+    def _draw_composition(self) -> None:
+        """Simple live species distribution bar; all segments sum to 100% of occupied cells."""
+        if not hasattr(self, "composition_canvas"):
+            return
+        cv=self.composition_canvas
+        cv.delete("all")
+        w=max(1,cv.winfo_width())
+        cv.create_rectangle(0,0,w,11,fill=PANEL_2,outline="")
+        counts=self.world.counts()
+        total=max(1,counts["population"])
+        if self.world.mode=="classic":
+            numbers=[counts["population"]]
+        else:
+            numbers=[counts.get(key,0) for key in ("plants","herbivores","predators")]
+        pos=0.0
+        colors=PALETTES[self.palette_var.get()].species
+        for n,color in zip(numbers,colors):
+            width=w*n/total
+            if width>0:
+                cv.create_rectangle(pos,0,pos+width,11,fill="#%02x%02x%02x"%color,outline="")
+            pos+=width
+
+    def _chart_motion(self, event: tk.Event[Any]) -> None:
+        rows=self.experiment.records[-120:]
+        if len(rows)<2:
+            return
+        from .plotting import nearest_sample_index
+        index=nearest_sample_index(event.x,16,max(17,self.chart.winfo_width()-15),len(rows))
+        item=rows[index]
+        text=f"g {item.get('generation','—')}  ·  {item.get('population',0):,} клеток"
+        self.chart.delete("inspection")
+        x=16+index/max(1,len(rows)-1)*(max(180,self.chart.winfo_width())-31)
+        self.chart.create_line(x,18,x,max(30,self.chart.winfo_height()-29),fill=MUTED,
+                               dash=(2,3),tags="inspection")
+        self.chart.create_text(x+3,18,text=text,fill=TEXT,anchor="nw",
+                               font=(FONT,8),tags="inspection")
 
     def _draw_chart(self) -> None:
-        chart = self.chart
-        chart.delete("all")
-        width, height = max(chart.winfo_width(), 220), 164
-        x0, x1, y0, y1 = 12, width-13, 14, height-26
-        for i in range(4):
-            y = y0 + (y1-y0) * i / 3
-            chart.create_line(x0, y, x1, y, fill="#294050", dash=(2, 5))
-        rows = self.experiment.records[-120:]
-        if len(rows) < 2:
-            chart.create_text(width/2, height/2, text="История появится после запуска",
-                              fill=MUTED, font=(FONT, 9))
-            return
-        chart_type = self.chart_mode_var.get() if self.world.mode == "ecosystem" else "Численность"
-        if chart_type == "Численность":
-            names = ["population"] if self.world.mode == "classic" else ["plants", "herbivores", "predators"]
-            colors = [GREEN] if self.world.mode == "classic" else [GREEN, YELLOW, PINK]
+        rows=self.experiment.records[-120:]
+        chart_type=self.chart_mode_var.get() if self.world.mode=="ecosystem" else "Численность"
+        if chart_type=="Численность":
+            names=["population"] if self.world.mode=="classic" else ["plants","herbivores","predators"]
+            colors=[GREEN] if self.world.mode=="classic" else [GREEN,YELLOW,PINK]
         else:
-            gene = {"Метаболизм": "metabolism", "Зрение": "sight", "Плодовитость": "fertility"}[chart_type]
-            names = [f"herbivores_{gene}", f"predators_{gene}"]
-            colors = [YELLOW, PINK]
-        seen = [float(row[key]) for row in rows for key in names if row.get(key) is not None]
-        ymax = max(1.0, max(seen, default=0)) * 1.05
-        chart.create_text(x1, 4, text=f"{ymax:.2f}" if chart_type != "Численность" else f"{int(ymax)}",
-                          fill=MUTED, anchor="ne", font=(FONT, 8))
-        chart.create_text(x0, height-9, text=f"{rows[0]['generation']}", fill=MUTED,
-                          anchor="w", font=(FONT, 8))
-        chart.create_text(x1, height-9, text=f"{rows[-1]['generation']}", fill=MUTED,
-                          anchor="e", font=(FONT, 8))
-        for name, color in zip(names, colors):
-            segment: list[float] = []
-            def flush() -> None:
-                if len(segment) >= 4:
-                    chart.create_line(*segment, fill=color, width=2, smooth=False)
-            for i, row in enumerate(rows):
-                value = row.get(name)
-                if value is None:
-                    flush()
-                    segment = []
-                    continue
-                x = x0 + i / (len(rows)-1) * (x1-x0)
-                y = y1 - float(value) / ymax * (y1-y0)
-                segment.extend((x, y))
-            flush()
-            if len(segment) >= 2:
-                chart.create_oval(segment[-2]-2, segment[-1]-2,
-                                  segment[-2]+2, segment[-1]+2, fill=color, outline="")
+            gene={"Метаболизм":"metabolism","Зрение":"sight","Плодовитость":"fertility"}[chart_type]
+            names=[f"herbivores_{gene}",f"predators_{gene}"]
+            colors=[YELLOW,PINK]
+        draw_history_chart(self.chart,rows,names,colors,background=BG,border=EDGE,
+                           muted=MUTED,fill=self.chart_fill_var.get())
 
     def fit_world(self) -> None:
         w, h = max(self.canvas.winfo_width(), 500), max(self.canvas.winfo_height(), 400)
@@ -1289,6 +1356,8 @@ class LifeLabApp:
                                 self.cam_x+self.world.width*self.zoom,
                                 self.cam_y+self.world.height*self.zoom,
                                 outline=PALETTES[self.palette_var.get()].border, width=1)
+        if self.overlay_var.get() and self.zoom>=4:
+            self._draw_coordinate_rulers(canvas,x0,y0,x1,y1,vw,vh)
         if self.pointer:
             x, y = self.pointer
             if 0 <= x < self.world.width and 0 <= y < self.world.height:
@@ -1304,6 +1373,25 @@ class LifeLabApp:
                                             outline=PINK if self.tool == "erase" else GREEN, width=2)
         self.zoom_label.config(text=f"{self.zoom} px / кл.")
         self._draw_minimap()
+
+    def _draw_coordinate_rulers(self, canvas: tk.Canvas, x0: int, y0: int,
+                                x1: int, y1: int, width: int, height: int) -> None:
+        """Viewport scales are cosmetic and use only visible cell coordinates."""
+        if x1<=x0 or y1<=y0:
+            return
+        interval=1
+        while interval*self.zoom<56:
+            interval*=2
+        for x in range((x0//interval)*interval,x1,interval):
+            sx=self.cam_x+x*self.zoom
+            if 12<=sx<=width-20:
+                canvas.create_line(sx,0,sx,7,fill=GREEN)
+                canvas.create_text(sx+3,9,text=str(x),anchor="nw",fill=MUTED,font=(FONT,8))
+        for y in range((y0//interval)*interval,y1,interval):
+            sy=self.cam_y+y*self.zoom
+            if 14<=sy<=height-20:
+                canvas.create_line(0,sy,7,sy,fill=GREEN)
+                canvas.create_text(10,sy+2,text=str(y),anchor="nw",fill=MUTED,font=(FONT,8))
 
     def _tick(self) -> None:
         now = time.perf_counter()
